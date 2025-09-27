@@ -1,0 +1,495 @@
+################################################################################
+# FILE: reddit_mass_downloader\cli.py
+################################################################################
+import argparse
+import asyncio
+from typing import List, Tuple, Optional
+
+from reddit_mass_downloader.downloader_pipeline import DownloaderPipeline
+from redditcommand.utils.session import GlobalSession
+
+VALID_TIMES = {"all", "year", "month", "week", "day"}
+VALID_TYPES = {"image", "video"}
+
+
+def parse_telegramish(args: List[str]) -> Tuple[Optional[str], List[str], List[str], int, Optional[str], str]:
+    """Return (time_filter, subreddits, search_terms, count, type, sort)"""
+    tokens = [t for t in args if t and t not in ("/r", "r", "r/")]
+
+    time_filter = tokens[0].lower() if tokens and tokens[0].lower() in VALID_TIMES else None
+    tokens = tokens[1:] if time_filter else tokens
+
+    if not tokens:
+        raise SystemExit("No subreddits provided. Example: /r year kpop sana 5 image")
+
+    subreddits = [s.strip().lstrip("r/") for s in tokens[0].split(",") if s.strip()]
+    tokens = tokens[1:]
+
+    media_count = 1
+    media_type = None
+    search_terms: List[str] = []
+    sort = "top" if time_filter else "hot"
+
+    for t in tokens:
+        low = t.lower()
+        if low.isdigit():
+            media_count = int(low)
+        elif low in VALID_TYPES:
+            media_type = low
+        else:
+            search_terms.append(t)
+
+    return time_filter, subreddits, search_terms, media_count, media_type, sort
+
+
+def build_argparser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Reddit Mass Downloader (CLI)")
+    p.add_argument("cmd", nargs="*", help="Telegram-like command tokens, e.g. /r year kpop sana 5 image")
+    p.add_argument("--subs", "-s", help="Comma-separated subreddits (fallback if not using telegram-like)")
+    p.add_argument("--time", "-t", choices=sorted(VALID_TIMES), help="time_filter for top/search")
+    p.add_argument("--count", "-n", type=int, default=1, help="number of media to download")
+    p.add_argument("--type", choices=sorted(VALID_TYPES), help="media type filter")
+    p.add_argument("--sort", choices=["hot", "top"], default="hot", help="sort mode")
+    p.add_argument("terms", nargs=argparse.REMAINDER, help="search terms (space-separated)")
+    return p
+
+
+async def main_async():
+    ap = build_argparser()
+    ns = ap.parse_args()
+
+    if ns.cmd:
+        time_filter, subs, terms, count, mtype, sort = parse_telegramish(ns.cmd)
+    else:
+        subs = [s.strip().lstrip("r/") for s in (ns.subs or "").split(",") if s.strip()]
+        if not subs:
+            raise SystemExit("Provide subreddits via telegram-like tokens or --subs.")
+        time_filter = ns.time
+        terms = ns.terms or []
+        count = ns.count
+        mtype = ns.type
+        sort = ("top" if time_filter else ns.sort)
+
+    pipe = DownloaderPipeline(
+        subreddits=subs,
+        search_terms=terms,
+        sort=sort,
+        time_filter=time_filter,
+        media_type=mtype,
+        media_count=count,
+    )
+
+    saved = 0
+    try:
+        saved = await pipe.run()
+    finally:
+        # Extra guard in case pipeline exits early
+        try:
+            await GlobalSession.close()
+        except Exception:
+            pass
+
+    print("Saved", saved, "file(s) to C:\\Reddit")
+
+
+def main():
+    asyncio.run(main_async())
+
+
+if __name__ == "__main__":
+    main()
+
+
+################################################################################
+# FILE: reddit_mass_downloader\config_overrides.py
+################################################################################
+from pathlib import Path
+
+OUTPUT_ROOT = Path(r"C:\Reddit").resolve()
+FILENAME_TEMPLATE = "{created}_{id}_{slug}{ext}"
+WRITE_SUBREDDIT_MANIFEST = True
+
+# Where JSON run reports are saved
+REPORT_DIR = (OUTPUT_ROOT / "_reports").resolve()
+
+ENABLE_COMPRESSION = False
+MAX_FILE_SIZE_MB = 5_000
+
+OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+################################################################################
+# FILE: reddit_mass_downloader\downloader_pipeline.py
+################################################################################
+# downloader_pipeline.py
+import asyncio
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+from pathlib import Path
+
+from asyncpraw import Reddit
+
+from redditcommand.config import RedditClientManager
+from redditcommand.utils.log_manager import LogManager
+from redditcommand.fetch import MediaPostFetcher
+from redditcommand.utils.session import GlobalSession
+
+from reddit_mass_downloader.local_media_handler import LocalMediaSaver
+from reddit_mass_downloader.config_overrides import REPORT_DIR, OUTPUT_ROOT
+
+logger = LogManager.setup_main_logger()
+
+
+class DownloaderPipeline:
+    ...
+    async def run(self) -> int:
+        saved_count = 0
+        outcomes: List[Dict[str, Any]] = []   # per-post result entries
+
+        try:
+            self.reddit = await RedditClientManager.get_client()
+            self.fetcher = MediaPostFetcher()
+            await self.fetcher.init_client()
+
+            posts = await self.fetcher.fetch_from_subreddits(
+                subreddit_names=self.subreddits,
+                search_terms=self.search_terms,
+                sort=self.sort,
+                time_filter=self.time_filter,
+                media_type=self.media_type,
+                media_count=self.media_count,
+                update=None,
+                invalid_subreddits=set(),
+                processed_urls=set(),
+            )
+
+            if not posts:
+                logger.info("No posts fetched by downloader pipeline.")
+                self._print_and_write_report(outcomes, fetched=0)
+                return 0
+
+            saver = LocalMediaSaver(self.reddit)
+            await saver._ensure_ready()
+
+            for post in posts:
+                post_info = {
+                    "id": getattr(post, "id", None),
+                    "subreddit": getattr(getattr(post, "subreddit", None), "display_name", None),
+                    "title": getattr(post, "title", None),
+                    "url": getattr(post, "url", None),
+                }
+                try:
+                    path = await saver.save_post(post)
+                    if path:
+                        saved_count += 1
+                        outcomes.append({**post_info, "status": "saved", "path": str(path)})
+                    else:
+                        # save_post returning None is an error-like condition
+                        outcomes.append({**post_info, "status": "failed", "reason": "unknown (save_post returned None)"})
+                except FileExistsError as e:
+                    outcomes.append({**post_info, "status": "skipped", "reason": str(e)})
+                    logger.info(f"Skipped existing: {post_info['id']}: {e}")
+                except Exception as e:
+                    outcomes.append({**post_info, "status": "failed", "reason": str(e)})
+                    logger.error(f"Error saving post {post_info['id']}: {e}", exc_info=True)
+
+            self._print_and_write_report(outcomes, fetched=len(posts))
+            return saved_count
+
+        finally:
+            try:
+                await GlobalSession.close()
+            except Exception:
+                pass
+            try:
+                if self.reddit is not None and hasattr(self.reddit, "close"):
+                    await self.reddit.close()
+            except Exception:
+                pass
+
+    def _print_and_write_report(self, outcomes: List[Dict[str, Any]], fetched: int) -> None:
+        saved = sum(1 for o in outcomes if o["status"] == "saved")
+        failed = [o for o in outcomes if o["status"] == "failed"]
+        skipped = [o for o in outcomes if o["status"] == "skipped"]
+
+        # Console summary
+        print()
+        print("=== Download Report ===")
+        print(f"Fetched posts: {fetched}")
+        print(f"Saved: {saved}")
+        print(f"Skipped (exists): {len(skipped)}")
+        print(f"Failed: {len(failed)}")
+        if failed:
+            print("\nFailures (id → reason):")
+            for o in failed:
+                print(f" - {o.get('id')}: {o.get('reason')}")
+
+        # JSON report on disk
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = (REPORT_DIR / f"report_{ts}.json")
+        try:
+            data = {
+                "root": str(OUTPUT_ROOT),
+                "fetched": fetched,
+                "saved": saved,
+                "skipped": len(skipped),
+                "failed": len(failed),
+                "outcomes": outcomes,
+                "created_at": ts,
+            }
+            import json
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"\nReport written to: {report_path}")
+        except Exception as e:
+            logger.warning(f"Could not write report JSON: {e}")
+
+
+################################################################################
+# FILE: reddit_mass_downloader\filename_utils.py
+################################################################################
+import re
+from pathlib import Path
+
+SAFE_CHAR_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def slugify(text: str, max_len: int = 80) -> str:
+    text = text or ""
+    text = text.strip().lower()
+    text = re.sub(r"\s+", "_", text)
+    text = SAFE_CHAR_RE.sub("_", text)
+    if len(text) > max_len:
+        text = text[:max_len].rstrip("_-")
+    return text or "post"
+
+
+def with_unique_suffix(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem, ext = path.stem, path.suffix
+    for i in range(2, 10_000):
+        p = path.with_name(f"{stem}({i}){ext}")
+        if not p.exists():
+            return p
+    return path.with_name(f"{stem}(9999){ext}")
+
+
+################################################################################
+# FILE: reddit_mass_downloader\local_media_handler.py
+################################################################################
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Dict, Any, Tuple
+
+from asyncpraw import Reddit
+from asyncpraw.models import Submission
+
+from reddit_mass_downloader.filename_utils import slugify, with_unique_suffix
+from reddit_mass_downloader.config_overrides import (
+    OUTPUT_ROOT,
+    FILENAME_TEMPLATE,
+    WRITE_SUBREDDIT_MANIFEST,
+    ENABLE_COMPRESSION,
+    MAX_FILE_SIZE_MB,
+)
+
+from redditcommand.utils.media_utils import MediaDownloader, MediaUtils
+from redditcommand.handle_direct_link import MediaLinkResolver
+from redditcommand.utils.compressor import Compressor
+
+
+class LocalMediaSaver:
+    """
+    Saves a single media for a post to disk:
+      - if post is a Reddit gallery, resolves the FIRST image (same as the bot)
+      - otherwise uses MediaLinkResolver to resolve direct media url
+      - downloads to C:\Reddit\<subreddit>\, writes JSON sidecar (+ manifest)
+      - includes top comment (text + author) in the metadata
+    """
+    def __init__(self, reddit: Reddit, root: Path = OUTPUT_ROOT):
+        self.root = root
+        self.reddit = reddit
+        self.resolver = MediaLinkResolver()
+
+    async def _ensure_ready(self):
+        await self.resolver.init()
+
+    def _subdir(self, subreddit: str) -> Path:
+        p = self.root / subreddit
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @staticmethod
+    def _created_str(post: Submission) -> str:
+        try:
+            dt = datetime.fromtimestamp(int(post.created_utc), tz=timezone.utc)
+            return dt.strftime("%Y%m%d_%H%M%S")
+        except Exception:
+            return "00000000_000000"
+
+    def _build_paths(self, post: Submission, resolved_url: str) -> Dict[str, Path]:
+        sub = getattr(post.subreddit, "display_name", "unknown")
+        subdir = self._subdir(sub)
+        basename = resolved_url.split("?")[0]
+        ext = os.path.splitext(basename)[-1] or ".mp4"
+        slug = slugify(getattr(post, "title", ""))
+        created = self._created_str(post)
+        filename = FILENAME_TEMPLATE.format(id=post.id, created=created, subreddit=sub, slug=slug, ext=ext)
+
+        # Deterministic final paths (no suffixing; we overwrite atomically)
+        media_path = subdir / filename
+        meta_path = media_path.with_suffix(media_path.suffix + ".json")
+        return {"media": media_path, "meta": meta_path, "subdir": subdir}
+
+    @staticmethod
+    def _top_comment_fields(tc_obj_or_text) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Normalize the result of MediaUtils.fetch_top_comment(..., return_author=True)
+        into (text, author_name).
+        """
+        try:
+            # When return_author=True, the helper returns a Comment object;
+            # otherwise it can be a str (or None).
+            if hasattr(tc_obj_or_text, "body"):
+                text = getattr(tc_obj_or_text, "body", None)
+                author = getattr(getattr(tc_obj_or_text, "author", None), "name", None)
+            else:
+                text = tc_obj_or_text if isinstance(tc_obj_or_text, str) else None
+                author = None
+            if text:
+                text = text.strip()
+                if len(text) > 1000:
+                    text = text[:997] + "…"
+            return text or None, author
+        except Exception:
+            return None, None
+
+    def _metadata(
+        self,
+        post: Submission,
+        media_path: Path,
+        resolved_url: str,
+        top_comment_text: Optional[str],
+        top_comment_author: Optional[str],
+    ) -> Dict[str, Any]:
+        return {
+            "id": post.id,
+            "title": getattr(post, "title", None),
+            "author": getattr(getattr(post, "author", None), "name", None),
+            "subreddit": getattr(getattr(post, "subreddit", None), "display_name", None),
+            "permalink": f"https://reddit.com/comments/{post.id}",
+            "url": getattr(post, "url", None),
+            "resolved_url": resolved_url,
+            "created_utc": getattr(post, "created_utc", None),
+            "score": getattr(post, "score", None),
+            "upvote_ratio": getattr(post, "upvote_ratio", None),
+            "num_comments": getattr(post, "num_comments", None),
+            "flair": getattr(post, "link_flair_text", None),
+
+            # NEW:
+            "top_comment": top_comment_text,
+            "top_comment_author": top_comment_author,
+
+            "saved_path": str(media_path),
+        }
+
+    async def _resolve_media_url(self, post: Submission) -> Optional[str]:
+        url = getattr(post, "url", "") or ""
+        if "reddit.com/gallery/" in url or "/gallery/" in url:
+            return await MediaUtils.resolve_reddit_gallery(post.id, self.reddit)
+        return await self.resolver.resolve(url, post=post)
+
+    async def save_post(self, post: Submission) -> Optional[Path]:
+        await self._ensure_ready()
+        if not getattr(post, "url", None):
+            return None
+
+        resolved = await self._resolve_media_url(post)
+        if not resolved:
+            return None
+
+        paths = self._build_paths(post, resolved)
+
+        # --- download/move to temp, then atomic replace into final ---
+        target_media = paths["media"]
+        tmp_media = target_media.with_suffix(target_media.suffix + ".tmp")
+
+        try:
+            if tmp_media.exists():
+                tmp_media.unlink()
+        except Exception:
+            pass
+
+        if os.path.isfile(resolved) and not resolved.lower().startswith(("http://", "https://")):
+            os.replace(resolved, tmp_media)
+        else:
+            downloaded = await MediaDownloader.download_file(resolved, str(tmp_media))
+            if not downloaded:
+                return None
+
+        # Optional gif → mp4 conversion still on temp artifact
+        if str(tmp_media).lower().endswith(".gif"):
+            converted = await MediaUtils.convert_gif_to_mp4(str(tmp_media))
+            if not converted:
+                try: tmp_media.unlink()
+                except Exception: pass
+                return None
+            try: tmp_media.unlink()
+            except Exception: pass
+            tmp_media = Path(converted)
+
+        if ENABLE_COMPRESSION:
+            maybe = await Compressor.validate_and_compress(str(tmp_media), MAX_FILE_SIZE_MB)
+            if not maybe:
+                try: tmp_media.unlink()
+                except Exception: pass
+                return None
+            tmp_media = Path(maybe)
+
+        # Atomic overwrite into final path
+        os.replace(str(tmp_media), str(target_media))
+
+        # --- build + write sidecar JSON atomically ---
+        tc_obj = await MediaUtils.fetch_top_comment(post, return_author=True)
+        top_comment_text, top_comment_author = self._top_comment_fields(tc_obj)
+
+        meta = self._metadata(post, target_media, resolved, top_comment_text, top_comment_author)
+        tmp_meta = paths["meta"].with_suffix(paths["meta"].suffix + ".tmp")
+        try:
+            with open(tmp_meta, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_meta, paths["meta"])  # atomic replace
+        finally:
+            try:
+                if tmp_meta.exists():
+                    tmp_meta.unlink()
+            except Exception:
+                pass
+
+        if WRITE_SUBREDDIT_MANIFEST:
+            self._append_manifest(meta, paths["subdir"])
+
+        return target_media
+
+    @staticmethod
+    def _append_manifest(meta: Dict[str, Any], subdir: Path) -> None:
+        import csv
+        manifest = subdir / "manifest.csv"
+        exists = manifest.exists()
+        fieldnames = [
+            "saved_path", "id", "title", "author", "subreddit", "permalink", "url", "resolved_url",
+            "created_utc", "score", "upvote_ratio", "num_comments", "flair",
+            # NEW:
+            "top_comment", "top_comment_author",
+        ]
+        with open(manifest, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            if not exists:
+                w.writeheader()
+            w.writerow({k: meta.get(k) for k in fieldnames})
+
+

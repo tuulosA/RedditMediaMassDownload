@@ -58,7 +58,9 @@ class LocalMediaSaver:
         slug = slugify(getattr(post, "title", ""))
         created = self._created_str(post)
         filename = FILENAME_TEMPLATE.format(id=post.id, created=created, subreddit=sub, slug=slug, ext=ext)
-        media_path = with_unique_suffix(subdir / filename)
+
+        # Deterministic final paths (no suffixing; we overwrite atomically)
+        media_path = subdir / filename
         meta_path = media_path.with_suffix(media_path.suffix + ".json")
         return {"media": media_path, "meta": meta_path, "subdir": subdir}
 
@@ -131,37 +133,66 @@ class LocalMediaSaver:
 
         paths = self._build_paths(post, resolved)
 
-        # If resolver produced a local path, move it; else download
+        # --- download/move to temp, then atomic replace into final ---
+        target_media = paths["media"]
+        tmp_media = target_media.with_suffix(target_media.suffix + ".tmp")
+
+        try:
+            if tmp_media.exists():
+                tmp_media.unlink()
+        except Exception:
+            pass
+
         if os.path.isfile(resolved) and not resolved.lower().startswith(("http://", "https://")):
-            os.replace(resolved, paths["media"])
+            os.replace(resolved, tmp_media)
         else:
-            downloaded = await MediaDownloader.download_file(resolved, str(paths["media"]))
+            downloaded = await MediaDownloader.download_file(resolved, str(tmp_media))
             if not downloaded:
                 return None
-            if str(paths["media"]).lower().endswith(".gif"):
-                converted = await MediaUtils.convert_gif_to_mp4(str(paths["media"]))
-                if converted:
-                    paths["media"] = Path(converted)
+
+        # Optional gif → mp4 conversion still on temp artifact
+        if str(tmp_media).lower().endswith(".gif"):
+            converted = await MediaUtils.convert_gif_to_mp4(str(tmp_media))
+            if not converted:
+                try: tmp_media.unlink()
+                except Exception: pass
+                return None
+            try: tmp_media.unlink()
+            except Exception: pass
+            tmp_media = Path(converted)
 
         if ENABLE_COMPRESSION:
-            maybe = await Compressor.validate_and_compress(str(paths["media"]), MAX_FILE_SIZE_MB)
-            if maybe and maybe != str(paths["media"]):
-                paths["media"] = Path(maybe)
+            maybe = await Compressor.validate_and_compress(str(tmp_media), MAX_FILE_SIZE_MB)
+            if not maybe:
+                try: tmp_media.unlink()
+                except Exception: pass
+                return None
+            tmp_media = Path(maybe)
 
-        # NEW: fetch top comment (same logic as bot)
+        # Atomic overwrite into final path
+        os.replace(str(tmp_media), str(target_media))
+
+        # --- build + write sidecar JSON atomically ---
         tc_obj = await MediaUtils.fetch_top_comment(post, return_author=True)
         top_comment_text, top_comment_author = self._top_comment_fields(tc_obj)
 
-        # Write sidecar JSON (now with top_comment fields)
-        meta = self._metadata(post, paths["media"], resolved, top_comment_text, top_comment_author)
-        with open(paths["meta"], "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        meta = self._metadata(post, target_media, resolved, top_comment_text, top_comment_author)
+        tmp_meta = paths["meta"].with_suffix(paths["meta"].suffix + ".tmp")
+        try:
+            with open(tmp_meta, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_meta, paths["meta"])  # atomic replace
+        finally:
+            try:
+                if tmp_meta.exists():
+                    tmp_meta.unlink()
+            except Exception:
+                pass
 
-        # Optional manifest (now also include top_comment columns)
         if WRITE_SUBREDDIT_MANIFEST:
             self._append_manifest(meta, paths["subdir"])
 
-        return paths["media"]
+        return target_media
 
     @staticmethod
     def _append_manifest(meta: Dict[str, Any], subdir: Path) -> None:

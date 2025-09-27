@@ -1,5 +1,8 @@
+# downloader_pipeline.py
 import asyncio
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+from pathlib import Path
 
 from asyncpraw import Reddit
 
@@ -9,14 +12,14 @@ from redditcommand.fetch import MediaPostFetcher
 from redditcommand.utils.session import GlobalSession
 
 from reddit_mass_downloader.local_media_handler import LocalMediaSaver
+from reddit_mass_downloader.config_overrides import REPORT_DIR, OUTPUT_ROOT
 
 logger = LogManager.setup_main_logger()
 
 
 class DownloaderPipeline:
     """
-    Pulls posts using the existing redditcommand fetch layer (no changes there),
-    then saves media locally with LocalMediaSaver (handles galleries + top comment).
+    Pull posts via redditcommand (unchanged), then save locally via LocalMediaSaver.
     """
 
     def __init__(
@@ -40,8 +43,9 @@ class DownloaderPipeline:
 
     async def run(self) -> int:
         saved_count = 0
+        outcomes: List[Dict[str, Any]] = []
+
         try:
-            # Reuse the same client as the bot stack
             self.reddit = await RedditClientManager.get_client()
             self.fetcher = MediaPostFetcher()
             await self.fetcher.init_client()
@@ -53,27 +57,41 @@ class DownloaderPipeline:
                 time_filter=self.time_filter,
                 media_type=self.media_type,
                 media_count=self.media_count,
-                update=None,  # no Telegram Update in CLI
+                update=None,
                 invalid_subreddits=set(),
                 processed_urls=set(),
             )
 
             if not posts:
                 logger.info("No posts fetched by downloader pipeline.")
+                self._print_and_write_report(outcomes, fetched=0)
                 return 0
 
             saver = LocalMediaSaver(self.reddit)
             await saver._ensure_ready()
 
-            # Save sequentially to keep logs/user output tidy
             for post in posts:
+                post_info = {
+                    "id": getattr(post, "id", None),
+                    "subreddit": getattr(getattr(post, "subreddit", None), "display_name", None),
+                    "title": getattr(post, "title", None),
+                    "url": getattr(post, "url", None),
+                }
                 try:
                     path = await saver.save_post(post)
                     if path:
                         saved_count += 1
+                        outcomes.append({**post_info, "status": "saved", "path": str(path)})
+                    else:
+                        outcomes.append({**post_info, "status": "failed", "reason": "unknown (save_post returned None)"})
+                except FileExistsError as e:
+                    outcomes.append({**post_info, "status": "skipped", "reason": str(e)})
+                    logger.info(f"Skipped existing: {post_info['id']}: {e}")
                 except Exception as e:
-                    logger.error(f"Error saving post {getattr(post, 'id', '?')}: {e}", exc_info=True)
+                    outcomes.append({**post_info, "status": "failed", "reason": str(e)})
+                    logger.error(f"Error saving post {post_info['id']}: {e}", exc_info=True)
 
+            self._print_and_write_report(outcomes, fetched=len(posts))
             return saved_count
 
         finally:
@@ -86,3 +104,38 @@ class DownloaderPipeline:
                     await self.reddit.close()
             except Exception:
                 pass
+
+    def _print_and_write_report(self, outcomes: List[Dict[str, Any]], fetched: int) -> None:
+        saved = sum(1 for o in outcomes if o["status"] == "saved")
+        failed = [o for o in outcomes if o["status"] == "failed"]
+        skipped = [o for o in outcomes if o["status"] == "skipped"]
+
+        print()
+        print("=== Download Report ===")
+        print(f"Fetched posts: {fetched}")
+        print(f"Saved: {saved}")
+        print(f"Skipped (exists): {len(skipped)}")
+        print(f"Failed: {len(failed)}")
+        if failed:
+            print("\nFailures (id → reason):")
+            for o in failed:
+                print(f" - {o.get('id')}: {o.get('reason')}")
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = (REPORT_DIR / f"report_{ts}.json")
+        try:
+            import json
+            data = {
+                "root": str(OUTPUT_ROOT),
+                "fetched": fetched,
+                "saved": saved,
+                "skipped": len(skipped),
+                "failed": len(failed),
+                "outcomes": outcomes,
+                "created_at": ts,
+            }
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"\nReport written to: {report_path}")
+        except Exception as e:
+            logger.warning(f"Could not write report JSON: {e}")
