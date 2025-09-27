@@ -1,13 +1,18 @@
 import json
+from urllib.parse import urlparse, urlsplit, urlunsplit
+import re
 import os
+import time
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List, Union
+import html
 
 from asyncpraw import Reddit
 from asyncpraw.models import Submission
 
-from reddit_mass_downloader.filename_utils import slugify, with_unique_suffix
+from reddit_mass_downloader.filename_utils import slugify
 from reddit_mass_downloader.config_overrides import (
     OUTPUT_ROOT,
     FILENAME_TEMPLATE,
@@ -21,12 +26,33 @@ from redditcommand.handle_direct_link import MediaLinkResolver
 from redditcommand.utils.compressor import Compressor
 
 
+def _ext_from_mime(m: Optional[str]) -> str:
+    if not m:
+        return ""
+    m = m.lower()
+    if m in ("image/jpg", "image/jpeg"):
+        return ".jpg"
+    if m == "image/png":
+        return ".png"
+    if m == "image/gif":
+        return ".gif"
+    if m in ("video/mp4", "image/mp4"):
+        return ".mp4"
+    return ""
+
+
+def _ext_from_url(url: str) -> str:
+    path = urlparse(url).path
+    _, ext = os.path.splitext(path)
+    return ext or ""
+
+
 class LocalMediaSaver:
     """
-    Saves a single media for a post to disk:
-      - if post is a Reddit gallery, resolves the FIRST image (same as the bot)
-      - otherwise uses MediaLinkResolver to resolve direct media url
-      - downloads to C:\Reddit\<subreddit>\, writes JSON sidecar (+ manifest)
+    Saves media for a post to disk:
+      - if post is a Reddit gallery, resolves and downloads ALL items (image/video)
+      - otherwise uses MediaLinkResolver to resolve a single direct media URL
+      - downloads to C:\\Reddit\\<subreddit or collection_label>\\, writes JSON sidecar (+ manifest)
       - includes top comment (text + author) in the metadata
     """
     def __init__(self, reddit: Reddit, root: Path = OUTPUT_ROOT, collection_label: Optional[str] = None):
@@ -53,18 +79,188 @@ class LocalMediaSaver:
             return dt.strftime("%Y%m%d_%H%M%S")
         except Exception:
             return "00000000_000000"
+        
+    @staticmethod
+    def _normalize_media_url(u: str) -> str:
+        """Clean up common media hosts before resolving (esp. Redgifs)."""
+        if not u:
+            return u
+        u = html.unescape(u).strip()
 
-    def _build_paths(self, post: Submission, resolved_url: str) -> Dict[str, Path]:
+        # --- Redgifs canonicalization ---
+        if "redgifs.com" in u:
+            # Capture the slug regardless of path variant (/watch/, /ifr/, extra query/fragment, mobile, etc.)
+            m = re.search(r"redgifs\.com/(?:watch|ifr)/([a-z0-9]+)", u, flags=re.I)
+            if m:
+                slug = m.group(1)
+                return f"https://www.redgifs.com/watch/{slug}"
+
+            # If no explicit slug match, at least drop query/fragment noise
+            parts = urlsplit(u)
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+        # Default: drop only fragment for other hosts that sometimes append it
+        parts = urlsplit(u)
+        if parts.fragment:
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+
+        return u
+
+    # --- NEW: robust finalization for Windows locks (AV/indexer) ---
+    async def _finalize_tmp(self, tmp_path: Path, final_path: Path, *, attempts: int = 5, delay_sec: float = 0.2) -> bool:
+        """
+        Try to atomically replace tmp_path -> final_path.
+        Retries to avoid transient Windows locks. Falls back to copy+unlink.
+        """
+        if not tmp_path.exists():
+            return final_path.exists()
+
+        for _ in range(attempts):
+            try:
+                os.replace(str(tmp_path), str(final_path))
+                return True
+            except Exception:
+                time.sleep(delay_sec)
+
+        # Fallback: copy then unlink
+        try:
+            shutil.copyfile(str(tmp_path), str(final_path))
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            if final_path.exists():
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
+                return True
+        return final_path.exists()
+
+    # === Robust gallery resolver: returns (url, ext) per item ===
+    async def _resolve_gallery_items(self, post: Submission) -> List[Tuple[str, str]]:
+        """Return list of (direct_url, ext) for a Reddit gallery.
+        Handles crossposts by following the parent/original submission.
+        """
+        def extract_items(subm: Submission) -> List[Tuple[str, str]]:
+            gdata = getattr(subm, "gallery_data", None)
+            mmeta = getattr(subm, "media_metadata", None)
+            if not gdata or not mmeta:
+                return []
+            out: List[Tuple[str, str]] = []
+            items = gdata.get("items", []) or []
+            for it in items:
+                mid = it.get("media_id")
+                if not mid:
+                    continue
+                md = mmeta.get(mid) or {}
+                if (md.get("status") or "").lower() != "valid":
+                    continue
+                mime = md.get("m")
+                s = md.get("s") or {}
+                # Prefer video mp4 (for gifv), then image "u", then legacy "gif"
+                candidate = s.get("mp4") or s.get("u") or s.get("gif")
+                if not candidate:
+                    previews = md.get("p") or []
+                    if previews:
+                        candidate = previews[-1].get("u")
+                if not candidate:
+                    continue
+                candidate = html.unescape(candidate)
+                ext = _ext_from_url(candidate) or _ext_from_mime(mime) or (".mp4" if s.get("mp4") else ".jpg")
+                out.append((candidate, ext))
+            return out
+
+        # Make sure lazy fields are available
+        try:
+            await post.load()
+        except Exception:
+            pass
+
+        # 1) If this *is* a gallery, use it directly
+        if bool(getattr(post, "is_gallery", False)):
+            items = extract_items(post)
+            if items:
+                return items
+
+        # 2) Otherwise, chase the original submission (common for crossposts)
+        candidate_ids: List[str] = []
+
+        # from URL like https://www.reddit.com/gallery/<id>
+        url = getattr(post, "url", "") or ""
+        m = re.search(r"/gallery/([a-z0-9]+)", url, re.I)
+        if m:
+            candidate_ids.append(m.group(1).lower())
+
+        # from crosspost_parent_list
+        try:
+            cpl = getattr(post, "crosspost_parent_list", None)
+            if isinstance(cpl, list) and cpl:
+                pid = cpl[0].get("id")
+                if pid:
+                    candidate_ids.append(str(pid).lower())
+        except Exception:
+            pass
+
+        # from crosspost_parent fullname 't3_<id>'
+        try:
+            cpf = getattr(post, "crosspost_parent", None)
+            if isinstance(cpf, str) and cpf.startswith("t3_"):
+                candidate_ids.append(cpf.split("_", 1)[1].lower())
+        except Exception:
+            pass
+
+        # Dedup while preserving order
+        seen = set()
+        cand_unique = []
+        for cid in candidate_ids:
+            if cid and cid not in seen:
+                seen.add(cid)
+                cand_unique.append(cid)
+
+        # Try each candidate original
+        for cid in cand_unique:
+            try:
+                orig = self.reddit.submission(id=cid)
+                await orig.load()
+                if bool(getattr(orig, "is_gallery", False)):
+                    items = extract_items(orig)
+                    if items:
+                        return items
+            except Exception:
+                continue
+
+        # Nothing found
+        return []
+
+    def _build_paths(
+        self,
+        post: Submission,
+        resolved_url: str,
+        *,
+        index: Optional[int] = None,
+        override_ext: Optional[str] = None
+    ) -> Dict[str, Path]:
         sub = getattr(post.subreddit, "display_name", "unknown")
         subdir = self._subdir(sub)
         basename = resolved_url.split("?")[0]
-        ext = os.path.splitext(basename)[-1] or ".mp4"
+        ext = override_ext or os.path.splitext(basename)[-1] or ".mp4"
         slug = slugify(getattr(post, "title", ""))
         created = self._created_str(post)
-        filename = FILENAME_TEMPLATE.format(id=post.id, created=created, subreddit=sub, slug=slug, ext=ext)
 
-        # Deterministic final paths (no suffixing; we overwrite atomically)
-        media_path = subdir / filename
+        base_filename = FILENAME_TEMPLATE.format(
+            id=post.id, created=created, subreddit=sub, slug=slug, ext=ext
+        )
+
+        # If FILENAME_TEMPLATE ends with ext, we can inject the index before ext.
+        # Example: 20250913_..._slug.jpg  ->  20250913_..._slug_01.jpg
+        if index is not None:
+            stem, suffix = os.path.splitext(base_filename)
+            base_filename = f"{stem}_{index:02d}{suffix}"
+
+        media_path = subdir / base_filename
         meta_path = media_path.with_suffix(media_path.suffix + ".json")
         return {"media": media_path, "meta": meta_path, "subdir": subdir}
 
@@ -120,13 +316,25 @@ class LocalMediaSaver:
             "saved_path": str(media_path),
         }
 
-    async def _resolve_media_url(self, post: Submission) -> Optional[str]:
-        url = getattr(post, "url", "") or ""
-        if "reddit.com/gallery/" in url or "/gallery/" in url:
-            return await MediaUtils.resolve_reddit_gallery(post.id, self.reddit)
+    async def _resolve_media_url(self, post: Submission) -> Union[str, List[Tuple[str, str]], None]:
+        """Return a single URL (non-gallery) or list of (url, ext) tuples (gallery)."""
+        raw_url = getattr(post, "url", "") or ""
+        url = self._normalize_media_url(raw_url)   # <-- normalize here
+
+        # Detect reddit gallery by flag or URL
+        try:
+            await post.load()
+        except Exception:
+            pass
+
+        if bool(getattr(post, "is_gallery", False)) or "reddit.com/gallery/" in url or "/gallery/" in url:
+            items = await self._resolve_gallery_items(post)
+            return items or None
+
+        # Non-gallery: delegate with the cleaned URL
         return await self.resolver.resolve(url, post=post)
 
-    async def save_post(self, post: Submission) -> Optional[Path]:
+    async def save_post(self, post: Submission) -> Optional[Union[Path, List[Path]]]:
         await self._ensure_ready()
         if not getattr(post, "url", None):
             return None
@@ -135,12 +343,85 @@ class LocalMediaSaver:
         if not resolved:
             return None
 
+        # --- GALLERY CASE: list of (url, ext) ---
+        if isinstance(resolved, list):
+            saved_paths: List[Path] = []
+            total = len(resolved)
+            for i, (item_url, item_ext) in enumerate(resolved, start=1):
+                paths = self._build_paths(post, item_url, index=i, override_ext=item_ext)
+
+                target_media = paths["media"]
+                tmp_media = target_media.with_suffix(target_media.suffix + ".tmp")
+                try:
+                    if tmp_media.exists():
+                        tmp_media.unlink()
+                except Exception:
+                    pass
+
+                if os.path.isfile(item_url) and not item_url.lower().startswith(("http://", "https://")):
+                    os.replace(item_url, tmp_media)
+                else:
+                    downloaded = await MediaDownloader.download_file(item_url, str(tmp_media))
+                    if not downloaded:
+                        continue
+
+                # Optional: gif → mp4
+                if str(tmp_media).lower().endswith(".gif"):
+                    converted = await MediaUtils.convert_gif_to_mp4(str(tmp_media))
+                    if converted:
+                        try:
+                            tmp_media.unlink()
+                        except Exception:
+                            pass
+                        tmp_media = Path(converted)
+
+                if ENABLE_COMPRESSION:
+                    maybe = await Compressor.validate_and_compress(str(tmp_media), MAX_FILE_SIZE_MB)
+                    if not maybe:
+                        try:
+                            tmp_media.unlink()
+                        except Exception:
+                            pass
+                        continue
+                    tmp_media = Path(maybe)
+
+                # Robust finalize (retries + fallback)
+                ok = await self._finalize_tmp(tmp_media, target_media)
+                if not ok:
+                    # Couldn’t finalize; skip sidecar to avoid orphaned JSON
+                    continue
+
+                # Sidecar JSON (with gallery position)
+                tc_obj = await MediaUtils.fetch_top_comment(post, return_author=True)
+                top_comment_text, top_comment_author = self._top_comment_fields(tc_obj)
+                meta = self._metadata(post, target_media, item_url, top_comment_text, top_comment_author)
+                meta["gallery_index"] = i
+                meta["gallery_total"] = total
+
+                tmp_meta = paths["meta"].with_suffix(paths["meta"].suffix + ".tmp")
+                try:
+                    with open(tmp_meta, "w", encoding="utf-8") as f:
+                        json.dump(meta, f, ensure_ascii=False, indent=2)
+                    await self._finalize_tmp(tmp_meta, paths["meta"])
+                finally:
+                    try:
+                        if tmp_meta.exists():
+                            tmp_meta.unlink()
+                    except Exception:
+                        pass
+
+                if WRITE_SUBREDDIT_MANIFEST:
+                    self._append_manifest(meta, paths["subdir"])
+
+                saved_paths.append(target_media)
+
+            return saved_paths or None
+
+        # --- NON-GALLERY CASE: existing logic for a single URL ---
         paths = self._build_paths(post, resolved)
 
-        # --- download/move to temp, then atomic replace into final ---
         target_media = paths["media"]
         tmp_media = target_media.with_suffix(target_media.suffix + ".tmp")
-
         try:
             if tmp_media.exists():
                 tmp_media.unlink()
@@ -154,29 +435,34 @@ class LocalMediaSaver:
             if not downloaded:
                 return None
 
-        # Optional gif → mp4 conversion still on temp artifact
         if str(tmp_media).lower().endswith(".gif"):
             converted = await MediaUtils.convert_gif_to_mp4(str(tmp_media))
             if not converted:
-                try: tmp_media.unlink()
-                except Exception: pass
+                try:
+                    tmp_media.unlink()
+                except Exception:
+                    pass
                 return None
-            try: tmp_media.unlink()
-            except Exception: pass
+            try:
+                tmp_media.unlink()
+            except Exception:
+                pass
             tmp_media = Path(converted)
 
         if ENABLE_COMPRESSION:
             maybe = await Compressor.validate_and_compress(str(tmp_media), MAX_FILE_SIZE_MB)
             if not maybe:
-                try: tmp_media.unlink()
-                except Exception: pass
+                try:
+                    tmp_media.unlink()
+                except Exception:
+                    pass
                 return None
             tmp_media = Path(maybe)
 
-        # Atomic overwrite into final path
-        os.replace(str(tmp_media), str(target_media))
+        ok = await self._finalize_tmp(tmp_media, target_media)
+        if not ok:
+            return None
 
-        # --- build + write sidecar JSON atomically ---
         tc_obj = await MediaUtils.fetch_top_comment(post, return_author=True)
         top_comment_text, top_comment_author = self._top_comment_fields(tc_obj)
 
@@ -185,7 +471,7 @@ class LocalMediaSaver:
         try:
             with open(tmp_meta, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_meta, paths["meta"])  # atomic replace
+            await self._finalize_tmp(tmp_meta, paths["meta"])
         finally:
             try:
                 if tmp_meta.exists():
@@ -206,11 +492,14 @@ class LocalMediaSaver:
         fieldnames = [
             "saved_path", "id", "title", "author", "subreddit", "permalink", "url", "resolved_url",
             "created_utc", "score", "upvote_ratio", "num_comments", "flair",
-            # NEW:
             "top_comment", "top_comment_author",
+            # Optional gallery context (present for gallery items only)
+            "gallery_index", "gallery_total",
         ]
+        # make a shallow copy to ensure missing keys exist
+        row = {k: meta.get(k) for k in fieldnames}
         with open(manifest, "a", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
             if not exists:
                 w.writeheader()
-            w.writerow({k: meta.get(k) for k in fieldnames})
+            w.writerow(row)

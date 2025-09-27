@@ -87,12 +87,27 @@ class DownloaderPipeline:
                     "url": getattr(post, "url", None),
                 }
                 try:
-                    path = await saver.save_post(post)
-                    if path:
+                    result = await saver.save_post(post)
+                    if isinstance(result, list):
+                        if result:
+                            saved_count += len(result)
+                            for p in result:
+                                outcomes.append({**post_info, "status": "saved", "path": str(p)})
+                        else:
+                            outcomes.append({
+                                **post_info,
+                                "status": "failed",
+                                "reason": "gallery had 0 valid items (no usable media_metadata)"
+                            })
+                    elif result:
                         saved_count += 1
-                        outcomes.append({**post_info, "status": "saved", "path": str(path)})
+                        outcomes.append({**post_info, "status": "saved", "path": str(result)})
                     else:
-                        outcomes.append({**post_info, "status": "failed", "reason": "unknown (save_post returned None)"})
+                        outcomes.append({
+                            **post_info,
+                            "status": "failed",
+                            "reason": "no media resolved (not image/video or resolver declined)"
+                        })
 
                 except FileNotFoundError as e:
                     # Expected permanent-missing case (e.g., redgifs 410/404, dead imgur, etc.)
