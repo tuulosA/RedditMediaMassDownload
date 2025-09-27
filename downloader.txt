@@ -137,15 +137,38 @@ from redditcommand.utils.session import GlobalSession
 
 from reddit_mass_downloader.local_media_handler import LocalMediaSaver
 from reddit_mass_downloader.config_overrides import REPORT_DIR, OUTPUT_ROOT
+from reddit_mass_downloader.filename_utils import slugify
 
 logger = LogManager.setup_main_logger()
 
 
 class DownloaderPipeline:
-    ...
+    """
+    Pull posts via redditcommand (unchanged), then save locally via LocalMediaSaver.
+    """
+
+    def __init__(
+        self,
+        subreddits: List[str],
+        search_terms: Optional[List[str]] = None,
+        sort: str = "hot",
+        time_filter: Optional[str] = None,
+        media_type: Optional[str] = None,
+        media_count: int = 1,
+    ):
+        self.subreddits = subreddits
+        self.search_terms = search_terms or []
+        self.sort = sort
+        self.time_filter = time_filter
+        self.media_type = media_type
+        self.media_count = media_count
+
+        self.reddit: Optional[Reddit] = None
+        self.fetcher: Optional[MediaPostFetcher] = None
+
     async def run(self) -> int:
         saved_count = 0
-        outcomes: List[Dict[str, Any]] = []   # per-post result entries
+        outcomes: List[Dict[str, Any]] = []
 
         try:
             self.reddit = await RedditClientManager.get_client()
@@ -169,7 +192,12 @@ class DownloaderPipeline:
                 self._print_and_write_report(outcomes, fetched=0)
                 return 0
 
-            saver = LocalMediaSaver(self.reddit)
+            # Build collection folder from search terms (e.g., "kpop momo" -> "kpop_momo")
+            collection_label = None
+            if self.search_terms:
+                collection_label = slugify(" ".join(self.search_terms), max_len=120)
+
+            saver = LocalMediaSaver(self.reddit, collection_label=collection_label)
             await saver._ensure_ready()
 
             for post in posts:
@@ -185,7 +213,6 @@ class DownloaderPipeline:
                         saved_count += 1
                         outcomes.append({**post_info, "status": "saved", "path": str(path)})
                     else:
-                        # save_post returning None is an error-like condition
                         outcomes.append({**post_info, "status": "failed", "reason": "unknown (save_post returned None)"})
                 except FileExistsError as e:
                     outcomes.append({**post_info, "status": "skipped", "reason": str(e)})
@@ -213,7 +240,6 @@ class DownloaderPipeline:
         failed = [o for o in outcomes if o["status"] == "failed"]
         skipped = [o for o in outcomes if o["status"] == "skipped"]
 
-        # Console summary
         print()
         print("=== Download Report ===")
         print(f"Fetched posts: {fetched}")
@@ -225,10 +251,10 @@ class DownloaderPipeline:
             for o in failed:
                 print(f" - {o.get('id')}: {o.get('reason')}")
 
-        # JSON report on disk
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = (REPORT_DIR / f"report_{ts}.json")
         try:
+            import json
             data = {
                 "root": str(OUTPUT_ROOT),
                 "fetched": fetched,
@@ -238,7 +264,6 @@ class DownloaderPipeline:
                 "outcomes": outcomes,
                 "created_at": ts,
             }
-            import json
             with open(report_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             print(f"\nReport written to: {report_path}")
@@ -310,16 +335,20 @@ class LocalMediaSaver:
       - downloads to C:\Reddit\<subreddit>\, writes JSON sidecar (+ manifest)
       - includes top comment (text + author) in the metadata
     """
-    def __init__(self, reddit: Reddit, root: Path = OUTPUT_ROOT):
+    def __init__(self, reddit: Reddit, root: Path = OUTPUT_ROOT, collection_label: Optional[str] = None):
         self.root = root
         self.reddit = reddit
         self.resolver = MediaLinkResolver()
+        self.collection_label = collection_label
 
     async def _ensure_ready(self):
         await self.resolver.init()
 
     def _subdir(self, subreddit: str) -> Path:
-        p = self.root / subreddit
+        # If a collection label (e.g., from search terms) is provided,
+        # save everything under that directory. Otherwise, keep per-subreddit.
+        dir_name = self.collection_label or subreddit
+        p = self.root / dir_name
         p.mkdir(parents=True, exist_ok=True)
         return p
 

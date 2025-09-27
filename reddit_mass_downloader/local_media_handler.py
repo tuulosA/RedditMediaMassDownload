@@ -29,16 +29,20 @@ class LocalMediaSaver:
       - downloads to C:\Reddit\<subreddit>\, writes JSON sidecar (+ manifest)
       - includes top comment (text + author) in the metadata
     """
-    def __init__(self, reddit: Reddit, root: Path = OUTPUT_ROOT):
+    def __init__(self, reddit: Reddit, root: Path = OUTPUT_ROOT, collection_label: Optional[str] = None):
         self.root = root
         self.reddit = reddit
         self.resolver = MediaLinkResolver()
+        self.collection_label = collection_label
 
     async def _ensure_ready(self):
         await self.resolver.init()
 
     def _subdir(self, subreddit: str) -> Path:
-        p = self.root / subreddit
+        # If a collection label (e.g., from search terms) is provided,
+        # save everything under that directory. Otherwise, keep per-subreddit.
+        dir_name = self.collection_label or subreddit
+        p = self.root / dir_name
         p.mkdir(parents=True, exist_ok=True)
         return p
 
