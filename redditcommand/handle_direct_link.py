@@ -6,6 +6,7 @@ import asyncio
 
 from typing import Optional
 from redgifs.aio import API as RedGifsAPI
+from redgifs.errors import HTTPException as RedgifsHTTPError
 from asyncpraw.models import Submission
 
 from redditcommand.config import RedditVideoConfig
@@ -45,6 +46,11 @@ class MediaLinkResolver:
                 return media_url
 
             logger.warning(f"Unsupported URL format: {media_url}")
+
+        # >>> allow “not found” style errors to bubble so callers can report them
+        except FileNotFoundError:
+            raise
+
         except Exception as e:
             logger.error(f"Error resolving direct link for {media_url}: {e}", exc_info=True)
         return None
@@ -256,7 +262,6 @@ class MediaLinkResolver:
 
     async def _redgifs(self, media_url: str, post: Optional[Submission]) -> Optional[str]:
         try:
-            # Extract gif id defensively, RedGifs URLs are often .../watch/<id>
             base = media_url.split("?")[0].rstrip("/")
             parts = [p for p in base.split("/") if p]
             gif_id = parts[-1] if parts else ""
@@ -270,19 +275,36 @@ class MediaLinkResolver:
             await api.login()
             try:
                 gif = await api.get_gif(gif_id)
+            except RedgifsHTTPError as e:
+                status = getattr(e, "status", None)
+                msg = (str(e) or "").lower()
+                # Translate “expected” removals into a clean, reportable failure
+                if status == 410 or "gifdeleted" in msg or "gone" in msg:
+                    raise FileNotFoundError("redgifs: deleted (410)") from e
+                if status == 404:
+                    raise FileNotFoundError("redgifs: not found (404)") from e
+                # Anything else bubbles up to the general handler
+                raise
             finally:
-                await api.close()
+                try:
+                    await api.close()
+                except Exception:
+                    pass
 
             url = getattr(gif.urls, "hd", None) or getattr(gif.urls, "sd", None) or getattr(gif.urls, "file_url", None)
             if not url:
-                logger.info(f"RedGifs returned no downloadable URL for id {gif_id}")
-                return None
+                # Treat “no downloadable URL” as a not-found style failure
+                raise FileNotFoundError("redgifs: no downloadable URL")
 
             post_id = post.id if post else TempFileManager.extract_post_id_from_url(media_url) or gif_id or "unknown"
             temp_dir = TempFileManager.create_temp_dir("reddit_redgifs_")
             file_path = os.path.join(temp_dir, f"reddit_{post_id}.mp4")
 
             return await MediaDownloader.download_file(url, file_path, session=self.session)
+
+        except FileNotFoundError:
+            # bubble to resolve() (which re-raises) so the pipeline can show the reason
+            raise
         except Exception as e:
             logger.error(f"RedGifs error: {e}", exc_info=True)
         return None

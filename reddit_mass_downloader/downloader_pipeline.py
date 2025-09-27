@@ -93,9 +93,16 @@ class DownloaderPipeline:
                         outcomes.append({**post_info, "status": "saved", "path": str(path)})
                     else:
                         outcomes.append({**post_info, "status": "failed", "reason": "unknown (save_post returned None)"})
+
+                except FileNotFoundError as e:
+                    # Expected permanent-missing case (e.g., redgifs 410/404, dead imgur, etc.)
+                    outcomes.append({**post_info, "status": "failed", "reason": str(e)})
+                    logger.info(f"{post_info['id']}: {e}")   # no traceback
+
                 except FileExistsError as e:
                     outcomes.append({**post_info, "status": "skipped", "reason": str(e)})
                     logger.info(f"Skipped existing: {post_info['id']}: {e}")
+
                 except Exception as e:
                     outcomes.append({**post_info, "status": "failed", "reason": str(e)})
                     logger.error(f"Error saving post {post_info['id']}: {e}", exc_info=True)
