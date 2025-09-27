@@ -1,0 +1,9 @@
+asyncpraw
+python-telegram-bot
+python-telegram-bot[job-queue]
+aiohttp
+python-dotenv
+opencv-python
+pillow
+redgifs
+yt-dlp
