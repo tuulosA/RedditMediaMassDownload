@@ -4,8 +4,10 @@ import time
 import os
 from urllib.parse import urlparse
 import re
+from telegram.error import NetworkError
 
-from redditcommand.config import RedditClientManager, FollowUserConfig
+from redditcommand.config import RedditClientManager, FollowUserConfig, MediaConfig
+from redditcommand.utils.compressor import Compressor
 from redditcommand.utils.filter_utils import FilterUtils
 from redditcommand.utils.media_utils import MediaUtils, MediaDownloader, MediaSender
 from redditcommand.utils.tempfile_utils import TempFileManager
@@ -73,7 +75,33 @@ class FollowedUserMonitor:
                         continue
 
                     caption = self._build_caption(tg_user, reddit_user, post)
-                    await MediaSender.determine_type_and_send(file_path)(file_path, target, caption=caption)
+                    send_fn = MediaSender.determine_type_and_send(file_path)
+                    try:
+                        await send_fn(file_path, target, caption=caption)
+                    except NetworkError as e:
+                        # Handle Telegram 413 specifically: retry with tighter compression
+                        if "413" in str(e) or "Request Entity Too Large" in str(e):
+                            logger.warning("Got 413 from Telegram. Retrying with tighter compression...")
+                            # compress ~5MB under the configured limit as a safety margin
+                            try:
+                                retry_dir = TempFileManager.create_temp_dir("follow_retry_")
+                                retry_path = os.path.join(retry_dir, f"{post.id}_retry.mp4")
+                                # Try a lower target than the main limit (e.g., -5 MB, min 5 MB)
+                                safety_target = max(5, (MediaConfig.MAX_FILE_SIZE_MB or 50) - 5)
+                                smaller = await Compressor.compress(
+                                    input_path=file_path,
+                                    output_path=retry_path,
+                                    target_size_mb=safety_target
+                                )
+                                if smaller and await MediaUtils.validate_file(smaller):
+                                    await send_fn(smaller, target, caption=caption)
+                                else:
+                                    logger.error("Retry compression failed or still too large.")
+                            except Exception as ce:
+                                logger.error(f"413 retry failed: {ce}", exc_info=True)
+                        else:
+                            # Re-raise unexpected network errors
+                            raise
 
                 self.new_seen.add(post.id)
 
@@ -108,7 +136,13 @@ class FollowedUserMonitor:
         if not file_path or not await MediaUtils.validate_file(file_path):
             return None
 
-        return file_path
+        # NEW: ensure the file fits Telegram by compressing if needed
+        final_path = await Compressor.validate_and_compress(file_path, MediaConfig.MAX_FILE_SIZE_MB)
+        if final_path:
+            return final_path
+
+        # If we get here, even compression policy refused (too big or failed)
+        return None
 
     def _should_skip_post(self, tg_user, post_text):
         filters = FollowedUserStore.get_filters(tg_user)
