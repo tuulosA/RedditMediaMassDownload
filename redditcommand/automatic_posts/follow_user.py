@@ -95,8 +95,10 @@ class FollowedUserMonitor:
                                 )
                                 if smaller and await MediaUtils.validate_file(smaller):
                                     await send_fn(smaller, target, caption=caption)
+                                    TempFileManager.cleanup_file(smaller)
                                 else:
                                     logger.error("Retry compression failed or still too large.")
+
                             except Exception as ce:
                                 logger.error(f"413 retry failed: {ce}", exc_info=True)
                         else:
@@ -139,6 +141,8 @@ class FollowedUserMonitor:
         # NEW: ensure the file fits Telegram by compressing if needed
         final_path = await Compressor.validate_and_compress(file_path, MediaConfig.MAX_FILE_SIZE_MB)
         if final_path:
+            if final_path != file_path:
+                TempFileManager.cleanup_file(file_path)
             return final_path
 
         # If we get here, even compression policy refused (too big or failed)
