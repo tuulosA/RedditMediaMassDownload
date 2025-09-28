@@ -1,5 +1,5 @@
 import json
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import urlparse
 import re
 import os
 import time
@@ -79,32 +79,6 @@ class LocalMediaSaver:
             return dt.strftime("%Y%m%d_%H%M%S")
         except Exception:
             return "00000000_000000"
-        
-    @staticmethod
-    def _normalize_media_url(u: str) -> str:
-        """Clean up common media hosts before resolving (esp. Redgifs)."""
-        if not u:
-            return u
-        u = html.unescape(u).strip()
-
-        # --- Redgifs canonicalization ---
-        if "redgifs.com" in u:
-            # Capture the slug regardless of path variant (/watch/, /ifr/, extra query/fragment, mobile, etc.)
-            m = re.search(r"redgifs\.com/(?:watch|ifr)/([a-z0-9]+)", u, flags=re.I)
-            if m:
-                slug = m.group(1)
-                return f"https://www.redgifs.com/watch/{slug}"
-
-            # If no explicit slug match, at least drop query/fragment noise
-            parts = urlsplit(u)
-            return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
-
-        # Default: drop only fragment for other hosts that sometimes append it
-        parts = urlsplit(u)
-        if parts.fragment:
-            return urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
-
-        return u
 
     # --- NEW: robust finalization for Windows locks (AV/indexer) ---
     async def _finalize_tmp(self, tmp_path: Path, final_path: Path, *, attempts: int = 5, delay_sec: float = 0.2) -> bool:
@@ -318,10 +292,9 @@ class LocalMediaSaver:
 
     async def _resolve_media_url(self, post: Submission) -> Union[str, List[Tuple[str, str]], None]:
         """Return a single URL (non-gallery) or list of (url, ext) tuples (gallery)."""
-        raw_url = getattr(post, "url", "") or ""
-        url = self._normalize_media_url(raw_url)   # <-- normalize here
+        url = getattr(post, "url", "") or ""
 
-        # Detect reddit gallery by flag or URL
+        # Ensure gallery handling first (some crossposts use reddit.com/gallery/<id>)
         try:
             await post.load()
         except Exception:
@@ -331,7 +304,7 @@ class LocalMediaSaver:
             items = await self._resolve_gallery_items(post)
             return items or None
 
-        # Non-gallery: delegate with the cleaned URL
+        # Delegate ALL normalization to the resolver
         return await self.resolver.resolve(url, post=post)
 
     async def save_post(self, post: Submission) -> Optional[Union[Path, List[Path]]]:

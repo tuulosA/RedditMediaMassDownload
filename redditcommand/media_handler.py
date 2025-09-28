@@ -4,6 +4,7 @@ import asyncio
 import aiohttp
 import os
 import urllib.parse
+from urllib.parse import urlsplit, urlunsplit
 
 from typing import Optional
 from telegram import Update
@@ -86,17 +87,35 @@ class MediaProcessor:
 
     async def resolve_media_url(self, post: Submission) -> Optional[str]:
         try:
-            media_url = post.url
+            media_url = getattr(post, "url", "") or ""
+
+            # If the URL is already a local tmp file we created earlier and it's valid
             if media_url.startswith("/tmp") and await MediaUtils.validate_file(media_url):
                 return media_url
+
+            # Normalize RedGifs URLs that can include fragments or tracking query params,
+            # e.g. https://www.redgifs.com/watch/slug#rel=...;order=new  ->  https://www.redgifs.com/watch/slug
+            if "redgifs.com" in media_url:
+                s = urlsplit(media_url)
+                # keep scheme/netloc/path, drop query+fragment
+                media_url = urlunsplit((s.scheme, s.netloc, s.path, "", ""))
+
+            # Reddit gallery (by URL; your existing approach)
             if "gallery" in media_url:
-                return await MediaUtils.resolve_reddit_gallery(media_url.split("/")[-1], self.reddit)
+                gallery_id = media_url.rstrip("/").split("/")[-1]
+                return await MediaUtils.resolve_reddit_gallery(gallery_id, self.reddit)
 
             resolver = MediaLinkResolver()
             await resolver.init()
             return await resolver.resolve(media_url, post=post)
+
+        except FileNotFoundError as e:
+            # Expected permanent-missing case (e.g., RedGifs 410/404): log without traceback
+            logger.info(f"{getattr(post, 'id', '?')}: {e}")
+            return None
         except Exception as e:
-            logger.error(f"Error resolving media URL for post {post.id}: {e}", exc_info=True)
+            # Unexpected errors: keep traceback
+            logger.error(f"Error resolving media URL for post {getattr(post, 'id', '?')}: {e}", exc_info=True)
             return None
 
     async def download_and_validate_media(self, resolved_url: str, post_id: Optional[str] = None) -> Optional[str]:

@@ -1,8 +1,10 @@
 # redditcommand/handle_direct_link.py
 
 import os
+import re
 import aiohttp
 import asyncio
+from urllib.parse import urlsplit, urlunsplit
 
 from typing import Optional
 from redgifs.aio import API as RedGifsAPI
@@ -27,9 +29,45 @@ class MediaLinkResolver:
     async def init(self):
         self.session = await GlobalSession.get()
 
+    # ---- NEW: normalize incoming URLs (esp. Redgifs) -------------------------
+    @staticmethod
+    def _normalize_media_url(u: str) -> str:
+        """
+        Normalize common media hosts to canonical forms (drop fragments/queries).
+        For Redgifs, force: https://www.redgifs.com/watch/<slug>
+        """
+        if not u:
+            return u
+
+        # quick short-circuit if not Redgifs
+        if "redgifs.com" not in u:
+            parts = urlsplit(u)
+            # drop fragment only by default; keep query (some hosts need it)
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+
+        # Redgifs: extract slug from /watch/<id> or /ifr/<id> (ignore query/fragment)
+        parts = urlsplit(u)
+        path = parts.path or "/"
+        m = re.search(r"/(?:watch|ifr)/([a-z0-9]+)", path, flags=re.I)
+        if m:
+            slug = m.group(1)
+        else:
+            # fall back: last path segment (e.g., https://redgifs.com/<slug>)
+            segs = [p for p in path.split("/") if p]
+            slug = segs[-1] if segs else ""
+
+        if not slug:
+            # no usable slug; at least drop fragment/query
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+        return f"https://www.redgifs.com/watch/{slug}"
+
     async def resolve(self, media_url: str, post: Optional[Submission] = None) -> Optional[str]:
         if self.session is None:
             await self.init()
+
+        # Normalize once up front
+        media_url = self._normalize_media_url(media_url)
 
         try:
             if "v.redd.it" in media_url:
@@ -54,7 +92,7 @@ class MediaLinkResolver:
         except Exception as e:
             logger.error(f"Error resolving direct link for {media_url}: {e}", exc_info=True)
         return None
-    
+
     async def _v_reddit(self, media_url: str, post: Optional[Submission]) -> Optional[str]:
         """
         Download best available DASH video + audio when present, mux to a single file,
@@ -152,18 +190,15 @@ class MediaLinkResolver:
                     else:
                         logger.warning("vreddit mux failed after audio download; will try yt-dlp fallback.")
 
-            # 4) Fallback: let yt-dlp merge bestvideo+bestaudio from the v.redd.it page
-            #    This often succeeds when direct DASH_audio probing fails.
+            # 4) Fallback: yt-dlp
             try:
                 ytdlp_path = await self._download_with_ytdlp(media_url, post_id)
                 if ytdlp_path and os.path.exists(ytdlp_path):
-                    # Ensure canonical name
                     if ytdlp_path != out_path:
                         try:
                             os.replace(ytdlp_path, out_path)
                         except Exception:
                             out_path = ytdlp_path
-                    # cleanup any tmp video/audio
                     try:
                         TempFileManager.cleanup_file(video_tmp)
                         TempFileManager.cleanup_file(audio_tmp)
@@ -173,15 +208,14 @@ class MediaLinkResolver:
             except Exception as e:
                 logger.debug(f"yt-dlp fallback failed for vreddit: {e}")
 
-            # 5) Final fallback: return video-only but with canonical name
+            # 5) Final fallback: video-only
             try:
                 if video_tmp != out_path:
                     os.replace(video_tmp, out_path)
             except Exception as e:
                 logger.error(f"Failed to rename video-only to canonical name: {e}", exc_info=True)
-                return video_tmp  # last resort if rename fails
+                return video_tmp
 
-            # best-effort cleanup
             try:
                 TempFileManager.cleanup_file(audio_tmp)
             except Exception:
@@ -201,13 +235,11 @@ class MediaLinkResolver:
         has a reddit-hosted mirror, fall back to the resolver.
         """
         try:
-            # 1) Try yt-dlp (preserves audio when present)
             post_id = post.id if post else TempFileManager.extract_post_id_from_url(media_url) or "unknown"
             ytdlp_file = await self._download_with_ytdlp(media_url, post_id)
             if ytdlp_file:
                 return ytdlp_file
 
-            # 2) Fallback: if this Reddit post has reddit_video behind the scenes, try that.
             if post:
                 fallback = await RedditVideoResolver.resolve_video(post)
                 if fallback:
@@ -220,7 +252,6 @@ class MediaLinkResolver:
 
     async def _streamable(self, media_url: str, post: Optional[Submission]) -> Optional[str]:
         try:
-            # Extract shortcode defensively
             base = media_url.split("?")[0].rstrip("/")
             parts = [p for p in base.split("/") if p]
             shortcode = parts[-1] if parts else ""
@@ -235,7 +266,6 @@ class MediaLinkResolver:
                     return None
                 data = await resp.json()
 
-            # Prefer mp4, then progressive variants if present
             files = data.get("files", {}) or {}
             path = None
             if "mp4" in files and isinstance(files["mp4"], dict):
@@ -262,11 +292,20 @@ class MediaLinkResolver:
 
     async def _redgifs(self, media_url: str, post: Optional[Submission]) -> Optional[str]:
         try:
-            base = media_url.split("?")[0].rstrip("/")
-            parts = [p for p in base.split("/") if p]
-            gif_id = parts[-1] if parts else ""
-            if gif_id.lower() == "watch" and len(parts) >= 2:
-                gif_id = parts[-2]
+            # Normalize again defensively (cheap)
+            media_url = self._normalize_media_url(media_url)
+
+            parts = urlsplit(media_url)
+            path = parts.path or "/"
+
+            # Accept /watch/<id>, /ifr/<id>, or /<id>
+            m = re.search(r"/(?:watch|ifr)/([a-z0-9]+)", path, flags=re.I)
+            if m:
+                gif_id = m.group(1)
+            else:
+                segs = [p for p in path.split("/") if p]
+                gif_id = segs[-1] if segs else ""
+
             if not gif_id or any(c in gif_id for c in "/?#&"):
                 logger.warning(f"Invalid RedGifs id from URL: {media_url}")
                 return None
@@ -278,12 +317,10 @@ class MediaLinkResolver:
             except RedgifsHTTPError as e:
                 status = getattr(e, "status", None)
                 msg = (str(e) or "").lower()
-                # Translate “expected” removals into a clean, reportable failure
                 if status == 410 or "gifdeleted" in msg or "gone" in msg:
                     raise FileNotFoundError("redgifs: deleted (410)") from e
                 if status == 404:
                     raise FileNotFoundError("redgifs: not found (404)") from e
-                # Anything else bubbles up to the general handler
                 raise
             finally:
                 try:
@@ -293,7 +330,6 @@ class MediaLinkResolver:
 
             url = getattr(gif.urls, "hd", None) or getattr(gif.urls, "sd", None) or getattr(gif.urls, "file_url", None)
             if not url:
-                # Treat “no downloadable URL” as a not-found style failure
                 raise FileNotFoundError("redgifs: no downloadable URL")
 
             post_id = post.id if post else TempFileManager.extract_post_id_from_url(media_url) or gif_id or "unknown"
@@ -303,7 +339,6 @@ class MediaLinkResolver:
             return await MediaDownloader.download_file(url, file_path, session=self.session)
 
         except FileNotFoundError:
-            # bubble to resolve() (which re-raises) so the pipeline can show the reason
             raise
         except Exception as e:
             logger.error(f"RedGifs error: {e}", exc_info=True)
@@ -361,7 +396,6 @@ class MediaLinkResolver:
                 TempFileManager.cleanup_file(temp_dir)
                 return None
 
-            # Resolve the resulting file. We prefer mp4, but check a couple of common fallbacks.
             candidates = [
                 os.path.join(temp_dir, f"reddit_{post_id}.mp4"),
                 os.path.join(temp_dir, f"reddit_{post_id}.m4v"),
@@ -370,7 +404,6 @@ class MediaLinkResolver:
                 if os.path.exists(cand):
                     return cand
 
-            # As a last resort, find any file that matches the template prefix.
             prefix = f"reddit_{post_id}."
             for name in os.listdir(temp_dir):
                 if name.startswith(prefix):
