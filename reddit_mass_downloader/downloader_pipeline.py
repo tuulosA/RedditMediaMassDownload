@@ -1,8 +1,6 @@
 # downloader_pipeline.py
-import asyncio
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from pathlib import Path
 
 from asyncpraw import Reddit
 
@@ -13,7 +11,7 @@ from redditcommand.utils.session import GlobalSession
 
 from reddit_mass_downloader.local_media_handler import LocalMediaSaver
 from reddit_mass_downloader.config_overrides import REPORT_DIR, OUTPUT_ROOT
-from reddit_mass_downloader.filename_utils import slugify
+from reddit_mass_downloader.filename_utils import slugify_title
 
 logger = LogManager.setup_main_logger()
 
@@ -68,13 +66,15 @@ class DownloaderPipeline:
                 self._print_and_write_report(outcomes, fetched=0)
                 return 0
 
+            # --- replace this block in DownloaderPipeline.run() where collection_label is built ---
             # Build collection folder from subreddit + search terms
             collection_label = None
             if self.search_terms:
                 # If multiple subs, join them with '+' so it stays compact: "kpopfap+another momo"
                 sub_part = "+".join(self.subreddits) if len(self.subreddits) > 1 else self.subreddits[0]
                 label_raw = f"{sub_part} {' '.join(self.search_terms)}".strip()
-                collection_label = slugify(label_raw, max_len=120)  # -> "kpopfap_momo"
+                # use title-safe slugger now (keeps case; clamp to 120 like before)
+                collection_label = slugify_title(label_raw, max_len=120)
 
             saver = LocalMediaSaver(self.reddit, collection_label=collection_label)
             await saver._ensure_ready()

@@ -12,13 +12,14 @@ import html
 from asyncpraw import Reddit
 from asyncpraw.models import Submission
 
-from reddit_mass_downloader.filename_utils import slugify
+from reddit_mass_downloader.filename_utils import build_filename_clamped
 from reddit_mass_downloader.config_overrides import (
     OUTPUT_ROOT,
     FILENAME_TEMPLATE,
     WRITE_SUBREDDIT_MANIFEST,
     ENABLE_COMPRESSION,
     MAX_FILE_SIZE_MB,
+    MAX_FILENAME_LEN,  # NEW
 )
 
 from redditcommand.utils.media_utils import MediaDownloader, MediaUtils
@@ -221,21 +222,24 @@ class LocalMediaSaver:
         subdir = self._subdir(sub)
         basename = resolved_url.split("?")[0]
         ext = override_ext or os.path.splitext(basename)[-1] or ".mp4"
-        slug = slugify(getattr(post, "title", ""))
-        created = self._created_str(post)
 
-        base_filename = FILENAME_TEMPLATE.format(
-            id=post.id, created=created, subreddit=sub, slug=slug, ext=ext
-        )
+        # Build subreddit_title_id.ext (clamped)
+        title = getattr(post, "title", "") or ""
+        base_filename = build_filename_clamped(sub, title, post.id, ext, max_name_len=MAX_FILENAME_LEN)
 
-        # If FILENAME_TEMPLATE ends with ext, we can inject the index before ext.
-        # Example: 20250913_..._slug.jpg  ->  20250913_..._slug_01.jpg
+        # If gallery item, insert _NN before extension while staying under the clamp
         if index is not None:
             stem, suffix = os.path.splitext(base_filename)
-            base_filename = f"{stem}_{index:02d}{suffix}"
+            candidate = f"{stem}_{index:02d}{suffix}"
+            if len(candidate) > MAX_FILENAME_LEN:
+                # Trim stem to keep the index while respecting the cap
+                overflow = len(candidate) - MAX_FILENAME_LEN
+                stem = stem[:-overflow].rstrip("._-") if overflow < len(stem) else stem
+                candidate = f"{stem}_{index:02d}{suffix}"
+            base_filename = candidate
 
         media_path = subdir / base_filename
-        meta_path = media_path.with_suffix(media_path.suffix + ".json")
+        meta_path = media_path.with_suffix(media_path.suffix + ".json")  # -> .mp4.json
         return {"media": media_path, "meta": meta_path, "subdir": subdir}
 
     @staticmethod
