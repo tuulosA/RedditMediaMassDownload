@@ -5,6 +5,7 @@ import re
 import aiohttp
 import asyncio
 from urllib.parse import urlsplit, urlunsplit
+from pathlib import Path
 
 from typing import Optional
 from redgifs.aio import API as RedGifsAPI
@@ -18,6 +19,12 @@ from redditcommand.utils.tempfile_utils import TempFileManager
 from redditcommand.utils.media_utils import MediaDownloader
 from redditcommand.utils.reddit_video_resolver import RedditVideoResolver
 from redditcommand.utils.session import GlobalSession
+from redditcommand.utils.name_utils import (
+    temp_paths_for_vreddit,
+    temp_path_for_generic,
+    yt_dlp_output_template,
+)
+
 
 logger = LogManager.setup_main_logger()
 
@@ -155,12 +162,17 @@ class MediaLinkResolver:
                 logger.info(f"No valid DASH video for {media_url}")
                 return None
 
-            post_id = (post.id if post else TempFileManager.extract_post_id_from_url(media_url)) or "unknown"
-            temp_dir = TempFileManager.create_temp_dir("vreddit_")
+            # ensure we have a post for naming
+            if post is None:
+                class _Stub: pass
+                post = _Stub()
+                setattr(post, "id", TempFileManager.extract_post_id_from_url(media_url) or "unknown")
+                setattr(post, "title", "video")
+                class _Sub: pass
+                sub = _Sub(); setattr(sub, "display_name", "unknown")
+                setattr(post, "subreddit", sub)
 
-            out_path   = os.path.join(temp_dir, f"reddit_{post_id}.mp4")    # canonical return name
-            video_tmp  = os.path.join(temp_dir, f"reddit_{post_id}__video_tmp.mp4")
-            audio_tmp  = os.path.join(temp_dir, f"reddit_{post_id}__audio_tmp.m4a")
+            out_path, video_tmp, audio_tmp = temp_paths_for_vreddit(post, ext=".mp4")
 
             # 2) Download video
             video_tmp = await MediaDownloader.download_file(video_url, video_tmp, session=self.session)
@@ -192,7 +204,7 @@ class MediaLinkResolver:
 
             # 4) Fallback: yt-dlp
             try:
-                ytdlp_path = await self._download_with_ytdlp(media_url, post_id)
+                ytdlp_path = await self._download_with_ytdlp(media_url, post)
                 if ytdlp_path and os.path.exists(ytdlp_path):
                     if ytdlp_path != out_path:
                         try:
@@ -235,12 +247,25 @@ class MediaLinkResolver:
         has a reddit-hosted mirror, fall back to the resolver.
         """
         try:
-            post_id = post.id if post else TempFileManager.extract_post_id_from_url(media_url) or "unknown"
-            ytdlp_file = await self._download_with_ytdlp(media_url, post_id)
+            # Ensure we have a post object for naming (subreddit_title_id), like other handlers.
+            is_stub = False
+            if post is None:
+                is_stub = True
+                class _Stub: pass
+                post = _Stub()
+                setattr(post, "id", TempFileManager.extract_post_id_from_url(media_url) or "unknown")
+                setattr(post, "title", "video")
+                class _Sub: pass
+                sub = _Sub(); setattr(sub, "display_name", "unknown")
+                setattr(post, "subreddit", sub)
+
+            # Use yt-dlp with our centralized output template (subreddit_title_id.mp4)
+            ytdlp_file = await self._download_with_ytdlp(media_url, post)
             if ytdlp_file:
                 return ytdlp_file
 
-            if post:
+            # Only try the reddit-hosted fallback when we have a real Submission
+            if not is_stub and isinstance(post, Submission):
                 fallback = await RedditVideoResolver.resolve_video(post)
                 if fallback:
                     return fallback
@@ -281,9 +306,20 @@ class MediaLinkResolver:
             if not resolved:
                 return None
 
-            post_id = post.id if post else TempFileManager.extract_post_id_from_url(media_url) or shortcode or "unknown"
-            temp_dir = TempFileManager.create_temp_dir("reddit_streamable_")
-            file_path = os.path.join(temp_dir, f"reddit_{post_id}.mp4")
+            # Generic temp file using subreddit_title_id.ext
+            # Ensure `post` exists; if not, create a tiny stub (same idea as above)
+            if post is None:
+                class _Stub: pass
+                post = _Stub()
+                setattr(post, "id", TempFileManager.extract_post_id_from_url(media_url) or "unknown")
+                setattr(post, "title", "video")
+                class _Sub: pass
+                sub = _Sub(); setattr(sub, "display_name", "unknown")
+                setattr(post, "subreddit", sub)
+
+            file_path = temp_path_for_generic(post, ext=".mp4", prefix="reddit_streamable_")   # in _streamable
+            # or prefix="reddit_redgifs_" in _redgifs
+            # or prefix="reddit_imgur_" in _imgur (if you need a direct download; yt-dlp block below handles its own)
 
             return await MediaDownloader.download_file(resolved, file_path, session=self.session)
         except Exception as e:
@@ -332,9 +368,20 @@ class MediaLinkResolver:
             if not url:
                 raise FileNotFoundError("redgifs: no downloadable URL")
 
-            post_id = post.id if post else TempFileManager.extract_post_id_from_url(media_url) or gif_id or "unknown"
-            temp_dir = TempFileManager.create_temp_dir("reddit_redgifs_")
-            file_path = os.path.join(temp_dir, f"reddit_{post_id}.mp4")
+            # Generic temp file using subreddit_title_id.ext
+            # Ensure `post` exists; if not, create a tiny stub (same idea as above)
+            if post is None:
+                class _Stub: pass
+                post = _Stub()
+                setattr(post, "id", TempFileManager.extract_post_id_from_url(media_url) or "unknown")
+                setattr(post, "title", "video")
+                class _Sub: pass
+                sub = _Sub(); setattr(sub, "display_name", "unknown")
+                setattr(post, "subreddit", sub)
+
+            file_path = temp_path_for_generic(post, ext=".mp4", prefix="reddit_redgifs_")
+            # or prefix="reddit_redgifs_" in _redgifs
+            # or prefix="reddit_imgur_" in _imgur (if you need a direct download; yt-dlp block below handles its own)
 
             return await MediaDownloader.download_file(url, file_path, session=self.session)
 
@@ -345,17 +392,27 @@ class MediaLinkResolver:
         return None
 
     async def _yt_dlp(self, media_url: str, post: Optional[Submission]) -> Optional[str]:
-        post_id = post.id if post else TempFileManager.extract_post_id_from_url(media_url) or "unknown"
-        return await self._download_with_ytdlp(media_url, post_id)
+        # Ensure a post object exists (for subreddit_title_id naming)
+        if post is None:
+            class _Stub: pass
+            post = _Stub()
+            setattr(post, "id", TempFileManager.extract_post_id_from_url(media_url) or "unknown")
+            setattr(post, "title", "video")
+            class _Sub: pass
+            sub = _Sub(); setattr(sub, "display_name", "unknown")
+            setattr(post, "subreddit", sub)
 
-    async def _download_with_ytdlp(self, url: str, post_id: str) -> Optional[str]:
+        return await self._download_with_ytdlp(media_url, post)
+
+    async def _download_with_ytdlp(self, url: str, post: Submission) -> Optional[str]:
         """
         Download a video with yt-dlp to a temp directory using an output template.
         Forces an mp4 merge/remux and handles timeouts. Returns the final file path
         or None on failure.
         """
-        temp_dir = TempFileManager.create_temp_dir("ytdlp_video_")
-        output_tpl = os.path.join(temp_dir, f"reddit_{post_id}.%(ext)s")
+        # get "<temp_dir>", "<temp_dir>/<subreddit_title_id>" (no extension)
+        temp_dir, out_no_ext = yt_dlp_output_template(post, ext="mp4", prefix="ytdlp_video_")
+        output_tpl = f"{out_no_ext}.%(ext)s"
 
         command = [
             "yt-dlp",
@@ -396,20 +453,16 @@ class MediaLinkResolver:
                 TempFileManager.cleanup_file(temp_dir)
                 return None
 
-            candidates = [
-                os.path.join(temp_dir, f"reddit_{post_id}.mp4"),
-                os.path.join(temp_dir, f"reddit_{post_id}.m4v"),
-            ]
+            candidates = [f"{out_no_ext}.mp4", f"{out_no_ext}.m4v"]
             for cand in candidates:
                 if os.path.exists(cand):
                     return cand
-
-            prefix = f"reddit_{post_id}."
+            base = Path(out_no_ext).name
             for name in os.listdir(temp_dir):
-                if name.startswith(prefix):
-                    path = os.path.join(temp_dir, name)
-                    if os.path.isfile(path):
-                        return path
+                if name.startswith(base):
+                    p = os.path.join(temp_dir, name)
+                    if os.path.isfile(p):
+                        return p
 
             logger.error("yt-dlp succeeded but no output file was found")
         except Exception as e:

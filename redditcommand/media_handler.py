@@ -20,6 +20,7 @@ from redditcommand.utils.media_utils import MediaSender, MediaUtils, MediaDownlo
 from redditcommand.utils.compressor import Compressor
 from redditcommand.utils.tempfile_utils import TempFileManager
 from redditcommand.utils.session import GlobalSession
+from redditcommand.utils.name_utils import temp_path_for_generic
 
 logger = LogManager.setup_main_logger()
 
@@ -74,7 +75,7 @@ class MediaProcessor:
             if not resolved_url:
                 return None
 
-            file_path = await self.download_and_validate_media(resolved_url, media.id)
+            file_path = await self.download_and_validate_media(resolved_url, media)
             if not file_path:
                 return None
 
@@ -118,8 +119,8 @@ class MediaProcessor:
             logger.error(f"Error resolving media URL for post {getattr(post, 'id', '?')}: {e}", exc_info=True)
             return None
 
-    async def download_and_validate_media(self, resolved_url: str, post_id: Optional[str] = None) -> Optional[str]:
-        file_path = await self.download_file(resolved_url, post_id)
+    async def download_and_validate_media(self, resolved_url: str, post: Submission) -> Optional[str]:
+        file_path = await self.download_file(resolved_url, post)
         if not file_path:
             return None
 
@@ -133,21 +134,33 @@ class MediaProcessor:
         TempFileManager.cleanup_file(file_path)
         return None
 
-    async def download_file(self, resolved_url: str, post_id: Optional[str]) -> Optional[str]:
+    async def download_file(self, resolved_url: str, post: Submission) -> Optional[str]:
+        """
+        Download to a temp path named with subreddit_title_id.ext via name_utils.temp_path_for_generic.
+        If the input is already a local file, just validate and return it.
+        """
+        # Local/already-downloaded file path
         if os.path.isfile(resolved_url):
             return resolved_url if await MediaUtils.validate_file(resolved_url) else None
 
+        # Non-HTTP schemes (e.g., file:// or resolver-produced path-like strings)
         if not resolved_url.startswith(("http://", "https://")):
             return resolved_url if await MediaUtils.validate_file(resolved_url) else None
 
-        temp_dir = TempFileManager.create_temp_dir("reddit_media_")
+        # Pick extension from URL, default to .mp4
         path = urllib.parse.urlparse(resolved_url).path
         ext = os.path.splitext(path)[1] or ".mp4"
-        final_id = post_id or TempFileManager.extract_post_id_from_url(resolved_url) or "unknown"
-        file_path = os.path.join(temp_dir, f"reddit_{final_id}{ext}")
 
-        file_path = await MediaDownloader.download_file(resolved_url, file_path)
-        if file_path and file_path.endswith(".gif"):
+        # Build temp destination with subreddit_title_id.ext
+        dst_path = temp_path_for_generic(post, ext=ext, prefix="reddit_media_")
+
+        # Download
+        file_path = await MediaDownloader.download_file(resolved_url, dst_path)
+        if not file_path:
+            return None
+
+        # Convert gifs to mp4 for Telegram/video pipeline consistency
+        if file_path.lower().endswith(".gif"):
             converted = await MediaUtils.convert_gif_to_mp4(file_path)
             TempFileManager.cleanup_file(file_path)
             return converted

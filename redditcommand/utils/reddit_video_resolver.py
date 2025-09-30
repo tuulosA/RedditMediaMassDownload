@@ -11,6 +11,7 @@ from redditcommand.config import RedditVideoConfig
 from redditcommand.utils.tempfile_utils import TempFileManager
 from redditcommand.utils.session import GlobalSession
 from redditcommand.utils.log_manager import LogManager
+from redditcommand.utils.name_utils import temp_paths_for_vreddit
 
 logger = LogManager.setup_main_logger()
 
@@ -249,10 +250,7 @@ class RedditVideoResolver:
                 return None
 
             # ---------- paths (canonical out name; tmp for staging) ----------
-            temp_dir = TempFileManager.create_temp_dir("reddit_video_")
-            canonical_out = os.path.join(temp_dir, f"reddit_{post.id}.mp4")
-            video_tmp     = os.path.join(temp_dir, f"reddit_{post.id}__video_tmp.mp4")
-            audio_tmp     = os.path.join(temp_dir, f"reddit_{post.id}__audio_tmp.m4a")
+            canonical_out, video_tmp, audio_tmp = temp_paths_for_vreddit(post, ext=".mp4")
 
             # small helpers
             def _headers() -> Dict[str, str]:
