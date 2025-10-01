@@ -227,15 +227,33 @@ class LocalMediaSaver:
         title = getattr(post, "title", "") or ""
         base_filename = build_filename_clamped(sub, title, post.id, ext, max_name_len=MAX_FILENAME_LEN)
 
-        # If gallery item, insert _NN before extension while staying under the clamp
+        # If gallery item, insert _NN *before* the _<id> so the id is last.
         if index is not None:
-            stem, suffix = os.path.splitext(base_filename)
-            candidate = f"{stem}_{index:02d}{suffix}"
-            if len(candidate) > MAX_FILENAME_LEN:
-                # Trim stem to keep the index while respecting the cap
-                overflow = len(candidate) - MAX_FILENAME_LEN
-                stem = stem[:-overflow].rstrip("._-") if overflow < len(stem) else stem
+            stem, suffix = os.path.splitext(base_filename)              # e.g., "kpopfap_title_abc123", ".mp4"
+            # Split off the trailing "_<id>"
+            if "_" in stem:
+                prefix, last = stem.rsplit("_", 1)                      # prefix="kpopfap_title", last="abc123"
+                # Only treat as id if it matches the current post.id
+                if last == post.id:
+                    candidate = f"{prefix}_{index:02d}_{last}{suffix}"  # kpopfap_title_01_abc123.mp4
+                else:
+                    candidate = f"{stem}_{index:02d}{suffix}"           # fallback (should be rare)
+            else:
                 candidate = f"{stem}_{index:02d}{suffix}"
+
+            if len(candidate) > MAX_FILENAME_LEN:
+                # Trim only the *prefix* so we keep "_NN_<id>" intact at the end.
+                overflow = len(candidate) - MAX_FILENAME_LEN
+                # Recompute safe trim target
+                if "_" in stem and stem.endswith(f"_{post.id}"):
+                    prefix, _last = stem.rsplit("_", 1)
+                    trimmed_prefix = prefix[:-overflow].rstrip("._-") if overflow < len(prefix) else prefix
+                    candidate = f"{trimmed_prefix}_{index:02d}_{post.id}{suffix}"
+                else:
+                    # Generic trim if we couldn't detect the id reliably
+                    trimmed_stem = stem[:-overflow].rstrip("._-") if overflow < len(stem) else stem
+                    candidate = f"{trimmed_stem}_{index:02d}{suffix}"
+
             base_filename = candidate
 
         media_path = subdir / base_filename
