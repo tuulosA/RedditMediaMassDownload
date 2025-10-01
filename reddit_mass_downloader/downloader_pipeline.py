@@ -29,6 +29,8 @@ class DownloaderPipeline:
         time_filter: Optional[str] = None,
         media_type: Optional[str] = None,
         media_count: int = 1,
+        close_on_exit: bool = True,             # keep False when looping
+        external_reddit: Optional[Reddit] = None,  # NEW: inject shared client
     ):
         self.subreddits = subreddits
         self.search_terms = search_terms or []
@@ -37,17 +39,26 @@ class DownloaderPipeline:
         self.media_type = media_type
         self.media_count = media_count
 
-        self.reddit: Optional[Reddit] = None
+        self.reddit: Optional[Reddit] = external_reddit
         self.fetcher: Optional[MediaPostFetcher] = None
+
+        self._owns_reddit = external_reddit is None
+        self.close_on_exit = close_on_exit
 
     async def run(self) -> int:
         saved_count = 0
         outcomes: List[Dict[str, Any]] = []
 
         try:
-            self.reddit = await RedditClientManager.get_client()
+            # 1) Get or reuse Reddit client
+            if self.reddit is None:
+                self.reddit = await RedditClientManager.get_client()
+
+            # 2) Build fetcher and bind injected reddit before init_client()
             self.fetcher = MediaPostFetcher()
-            await self.fetcher.init_client()
+            # Important: set .reddit so fetcher.init_client() won't call the manager again
+            self.fetcher.reddit = self.reddit
+            await self.fetcher.init_client()  # no-op if reddit already set
 
             posts = await self.fetcher.fetch_from_subreddits(
                 subreddit_names=self.subreddits,
@@ -66,14 +77,11 @@ class DownloaderPipeline:
                 self._print_and_write_report(outcomes, fetched=0)
                 return 0
 
-            # --- replace this block in DownloaderPipeline.run() where collection_label is built ---
             # Build collection folder from subreddit + search terms
             collection_label = None
             if self.search_terms:
-                # If multiple subs, join them with '+' so it stays compact: "kpopfap+another momo"
                 sub_part = "+".join(self.subreddits) if len(self.subreddits) > 1 else self.subreddits[0]
                 label_raw = f"{sub_part} {' '.join(self.search_terms)}".strip()
-                # use title-safe slugger now (keeps case; clamp to 120 like before)
                 collection_label = slugify_title(label_raw, max_len=120)
 
             saver = LocalMediaSaver(self.reddit, collection_label=collection_label)
@@ -110,9 +118,8 @@ class DownloaderPipeline:
                         })
 
                 except FileNotFoundError as e:
-                    # Expected permanent-missing case (e.g., redgifs 410/404, dead imgur, etc.)
                     outcomes.append({**post_info, "status": "failed", "reason": str(e)})
-                    logger.info(f"{post_info['id']}: {e}")   # no traceback
+                    logger.info(f"{post_info['id']}: {e}")
 
                 except FileExistsError as e:
                     outcomes.append({**post_info, "status": "skipped", "reason": str(e)})
@@ -126,15 +133,18 @@ class DownloaderPipeline:
             return saved_count
 
         finally:
-            try:
-                await GlobalSession.close()
-            except Exception:
-                pass
-            try:
-                if self.reddit is not None and hasattr(self.reddit, "close"):
-                    await self.reddit.close()
-            except Exception:
-                pass
+            if self.close_on_exit:
+                try:
+                    await GlobalSession.close()
+                except Exception:
+                    pass
+                # Only close reddit if we created it here
+                if self._owns_reddit:
+                    try:
+                        if self.reddit is not None and hasattr(self.reddit, "close"):
+                            await self.reddit.close()
+                    except Exception:
+                        pass
 
     def _print_and_write_report(self, outcomes: List[Dict[str, Any]], fetched: int) -> None:
         saved = sum(1 for o in outcomes if o["status"] == "saved")
