@@ -17,6 +17,7 @@ from reddit_mass_downloader.config_overrides import (
     OUTPUT_ROOT,
     FILENAME_TEMPLATE,
     WRITE_SUBREDDIT_MANIFEST,
+    WRITE_JSON_SIDECARS,
     ENABLE_COMPRESSION,
     MAX_FILE_SIZE_MB,
     MAX_FILENAME_LEN,  # NEW
@@ -257,7 +258,7 @@ class LocalMediaSaver:
             base_filename = candidate
 
         media_path = subdir / base_filename
-        meta_path = media_path.with_suffix(media_path.suffix + ".json")  # -> .mp4.json
+        meta_path = media_path.with_suffix(media_path.suffix + ".json")  # computed, writing is optional
         return {"media": media_path, "meta": meta_path, "subdir": subdir}
 
     @staticmethod
@@ -386,24 +387,26 @@ class LocalMediaSaver:
                     # Couldn’t finalize; skip sidecar to avoid orphaned JSON
                     continue
 
-                # Sidecar JSON (with gallery position)
+                # Build metadata (used for manifest; JSON sidecar optional)
                 tc_obj = await MediaUtils.fetch_top_comment(post, return_author=True)
                 top_comment_text, top_comment_author = self._top_comment_fields(tc_obj)
                 meta = self._metadata(post, target_media, item_url, top_comment_text, top_comment_author)
                 meta["gallery_index"] = i
                 meta["gallery_total"] = total
 
-                tmp_meta = paths["meta"].with_suffix(paths["meta"].suffix + ".tmp")
-                try:
-                    with open(tmp_meta, "w", encoding="utf-8") as f:
-                        json.dump(meta, f, ensure_ascii=False, indent=2)
-                    await self._finalize_tmp(tmp_meta, paths["meta"])
-                finally:
+                # Optional: write .json sidecar next to media
+                if WRITE_JSON_SIDECARS:
+                    tmp_meta = paths["meta"].with_suffix(paths["meta"].suffix + ".tmp")
                     try:
-                        if tmp_meta.exists():
-                            tmp_meta.unlink()
-                    except Exception:
-                        pass
+                        with open(tmp_meta, "w", encoding="utf-8") as f:
+                            json.dump(meta, f, ensure_ascii=False, indent=2)
+                        await self._finalize_tmp(tmp_meta, paths["meta"])
+                    finally:
+                        try:
+                            if tmp_meta.exists():
+                                tmp_meta.unlink()
+                        except Exception:
+                            pass
 
                 if WRITE_SUBREDDIT_MANIFEST:
                     self._append_manifest(meta, paths["subdir"])
@@ -458,21 +461,23 @@ class LocalMediaSaver:
         if not ok:
             return None
 
+        # Build metadata (for manifest; JSON sidecar optional)
         tc_obj = await MediaUtils.fetch_top_comment(post, return_author=True)
         top_comment_text, top_comment_author = self._top_comment_fields(tc_obj)
-
         meta = self._metadata(post, target_media, resolved, top_comment_text, top_comment_author)
-        tmp_meta = paths["meta"].with_suffix(paths["meta"].suffix + ".tmp")
-        try:
-            with open(tmp_meta, "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
-            await self._finalize_tmp(tmp_meta, paths["meta"])
-        finally:
+
+        if WRITE_JSON_SIDECARS:
+            tmp_meta = paths["meta"].with_suffix(paths["meta"].suffix + ".tmp")
             try:
-                if tmp_meta.exists():
-                    tmp_meta.unlink()
-            except Exception:
-                pass
+                with open(tmp_meta, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+                await self._finalize_tmp(tmp_meta, paths["meta"])
+            finally:
+                try:
+                    if tmp_meta.exists():
+                        tmp_meta.unlink()
+                except Exception:
+                    pass
 
         if WRITE_SUBREDDIT_MANIFEST:
             self._append_manifest(meta, paths["subdir"])

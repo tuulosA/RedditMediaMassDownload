@@ -10,7 +10,7 @@ from redditcommand.fetch import MediaPostFetcher
 from redditcommand.utils.session import GlobalSession
 
 from reddit_mass_downloader.local_media_handler import LocalMediaSaver
-from reddit_mass_downloader.config_overrides import REPORT_DIR, OUTPUT_ROOT
+from reddit_mass_downloader.config_overrides import REPORT_DIR, OUTPUT_ROOT, WRITE_RUN_REPORT_JSON
 from reddit_mass_downloader.filename_utils import slugify_title
 
 logger = LogManager.setup_main_logger()
@@ -162,21 +162,23 @@ class DownloaderPipeline:
             for o in failed:
                 print(f" - {o.get('id')}: {o.get('reason')}")
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = (REPORT_DIR / f"report_{ts}.json")
-        try:
-            import json
-            data = {
-                "root": str(OUTPUT_ROOT),
-                "fetched": fetched,
-                "saved": saved,
-                "skipped": len(skipped),
-                "failed": len(failed),
-                "outcomes": outcomes,
-                "created_at": ts,
-            }
-            with open(report_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            print(f"\nReport written to: {report_path}")
-        except Exception as e:
-            logger.warning(f"Could not write report JSON: {e}")
+        # Optionally write a JSON run report (disabled by default)
+        if WRITE_RUN_REPORT_JSON:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_path = (REPORT_DIR / f"report_{ts}.json")
+            try:
+                import json
+                data = {
+                    "root": str(OUTPUT_ROOT),
+                    "fetched": fetched,
+                    "saved": saved,
+                    "skipped": len(skipped),
+                    "failed": len(failed),
+                    "outcomes": outcomes,
+                    "created_at": ts,
+                }
+                with open(report_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                print(f"\nReport written to: {report_path}")
+            except Exception as e:
+                logger.warning(f"Could not write report JSON: {e}")
