@@ -13,7 +13,7 @@ class BaseLogger:
         if isinstance(level, str):
             level = getattr(logging, level.upper(), logging.INFO)
         if level is None:
-            level = getattr(logging, os.getenv("LOG_LEVEL", "DEBUG").upper(), logging.INFO)
+            level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 
         logger = logging.getLogger()
         logger.setLevel(level)

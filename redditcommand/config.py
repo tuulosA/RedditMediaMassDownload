@@ -60,7 +60,7 @@ class MediaConfig:
     MAX_FILE_SIZE_MB = 50
     DEFAULT_SEMAPHORE_LIMIT = 10
     MAX_MEDIA_COUNT = 10
-    POST_LIMIT = 100
+    POST_LIMIT = 250
 
 class PipelineConfig:
     INITIAL_BACKOFF_SECONDS = 1.0
