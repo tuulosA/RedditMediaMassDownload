@@ -47,7 +47,7 @@ HUB_SUB = "kpopfap"
 # Personal/group subs (used when not using idol terms)
 PERSONAL_SUBS = [
     # TWICE
-    "myouimina", "nayeon", "jeongyeon", "momo", "sana", "jihyo", "dahyun", "chaeyoung", "tzuyu",
+    "myouimina", "nayeon", "jeongyeon", "momo", "sana", "jihyo", "dahyun", "chaeyoung", "tzuyu", "TzuyuTWICE",
     # LE SSERAFIM
     "chaewon", "chaewonkim", "sakura", "yunjinhuh", "kazuha", "kazuhanakamura", "hongeunchae", "eunchaehong",
     # ITZY
