@@ -1,9 +1,12 @@
-# tools/matrix_download.py
+# redditmedia/tools/matrix_download.py
 import asyncio
 import argparse
+from datetime import datetime
 from time import perf_counter
+from typing import List, Optional, Dict, Any
 
 from ..reddit_mass_downloader.downloader_pipeline import DownloaderPipeline
+from ..reddit_mass_downloader.config_overrides import REPORT_DIR, OUTPUT_ROOT
 from ..redditcommand.utils.session import GlobalSession
 from ..redditcommand.config import RedditClientManager
 
@@ -90,6 +93,7 @@ DEFAULT_TIMES = ["day"]
 #DEFAULT_TIMES = ["year", "all"]
 #DEFAULT_TIMES = ["all"]
 
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser("Matrix downloader for idols × subreddit × time (single-sub runs)")
     # NOTE: no CLI for picking idol vs group when no-terms; it's hard-coded above.
@@ -105,20 +109,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sort", choices=["top", "hot"], default="top", help="Sort mode")
     p.add_argument("--strict-single", action="store_true",
                    help="Error if more than one subreddit is provided")
-    ns = p.parse_args()
+    return p.parse_args()
 
-    # Choose defaults based on hard-coded booleans if --subs not provided
-    if ns.subs is None:
-        if USE_SEARCH_TERMS:
-            ns.subs = [HUB_SUB]
-        else:
-            ns.subs = (PERSONAL_GROUP_SUBS if USE_GROUP_SUBS else PERSONAL_SUBS)
-
-    return ns
 
 async def run_matrix(ns: argparse.Namespace) -> None:
-    if ns.strict_single and len(ns.subs) != 1:
+    if ns.strict_single and len(ns.subs or []) != 1:
         raise SystemExit("With --strict-single, provide exactly one subreddit via --subs.")
+
+    # Choose defaults based on hard-coded booleans if --subs not provided
+    if not ns.subs:
+        ns.subs = [HUB_SUB] if USE_SEARCH_TERMS else (PERSONAL_GROUP_SUBS if USE_GROUP_SUBS else PERSONAL_SUBS)
 
     grand_total = 0
     combos = 0
@@ -131,13 +131,17 @@ async def run_matrix(ns: argparse.Namespace) -> None:
         mode_str = f"NO TERMS → {scope}"
     print(f"\n=== MODE: {mode_str} ===")
 
+    # Aggregation containers for unified report
+    all_outcomes: List[Dict[str, Any]] = []
+    grand_fetched = grand_saved = grand_skipped = grand_failed = 0
+
     # Shared client
     reddit = await RedditClientManager.get_client()
 
     try:
         for sub in ns.subs:
             # Use idol terms list or a single None sentinel (no terms)
-            term_list = (ns.idols if USE_SEARCH_TERMS else [None])
+            term_list: List[Optional[str]] = (ns.idols if USE_SEARCH_TERMS else [None])
 
             for term in term_list:
                 for tf in ns.times:
@@ -150,17 +154,35 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                     pipe = DownloaderPipeline(
                         subreddits=[sub],
                         search_terms=([term] if (USE_SEARCH_TERMS and term is not None) else []),
-                        sort=ns.sort,                     
+                        sort=ns.sort,
                         time_filter=tf,
                         media_type=ns.type,
                         media_count=ns.count,
                         close_on_exit=False,
                         external_reddit=reddit,
+                        write_report=False,  # suppress per-run JSON; we’ll write one unified report
                     )
                     saved = await pipe.run()
                     combos += 1
                     grand_total += saved
                     print(f"[{sub} | {tf} | {human_term}] saved {saved}")
+
+                    # Aggregate this combo's summary
+                    summary = pipe.last_summary()
+                    if summary:
+                        grand_fetched += summary.fetched
+                        grand_saved += summary.saved
+                        grand_skipped += summary.skipped
+                        grand_failed += summary.failed
+                        combo_tag = {
+                            "subreddits": [sub],
+                            "search_terms": ([term] if (USE_SEARCH_TERMS and term is not None) else []),
+                            "time_filter": tf,
+                            "media_type": ns.type,
+                            "sort": ns.sort,
+                        }
+                        for o in summary.outcomes:
+                            all_outcomes.append({**o, "combo": combo_tag})
 
                     if ns.sleep > 0:
                         await asyncio.sleep(ns.sleep)
@@ -175,12 +197,34 @@ async def run_matrix(ns: argparse.Namespace) -> None:
         except Exception:
             pass
 
+    # ONE unified report for the whole matrix
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORT_DIR / f"matrix_report_{ts}.json"
+
+    import json
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "root": str(OUTPUT_ROOT),
+            "combos": combos,
+            "fetched": grand_fetched,
+            "saved": grand_saved,
+            "skipped": grand_skipped,
+            "failed": grand_failed,
+            "outcomes": all_outcomes,
+            "created_at": ts,
+            "mode": mode_str,
+        }, f, ensure_ascii=False, indent=2)
+
     dt = perf_counter() - t0
     print(f"\nTOTAL saved across {combos} combos: {grand_total}  (elapsed {dt:.1f}s)")
+    print(f"Unified report written to: {report_path}")
+
 
 def main():
     ns = parse_args()
     asyncio.run(run_matrix(ns))
+
 
 if __name__ == "__main__":
     main()

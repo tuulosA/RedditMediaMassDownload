@@ -1,4 +1,7 @@
-# reddit_mass_downloader/downloader_pipeline.py
+# redditmedia/reddit_mass_downloader/downloader_pipeline.py
+from __future__ import annotations
+
+from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -16,9 +19,18 @@ from .filename_utils import slugify_title
 logger = LogManager.setup_main_logger()
 
 
+@dataclass
+class RunSummary:
+    fetched: int
+    saved: int
+    skipped: int
+    failed: int
+    outcomes: List[Dict[str, Any]]
+
+
 class DownloaderPipeline:
     """
-    Pull posts via redditcommand (unchanged), then save locally via LocalMediaSaver.
+    Pull posts via redditcommand, then save locally via LocalMediaSaver.
     """
 
     def __init__(
@@ -29,8 +41,9 @@ class DownloaderPipeline:
         time_filter: Optional[str] = None,
         media_type: Optional[str] = None,
         media_count: int = 1,
-        close_on_exit: bool = True,             # keep False when looping
-        external_reddit: Optional[Reddit] = None,  # NEW: inject shared client
+        close_on_exit: bool = True,                  # keep False when looping
+        external_reddit: Optional[Reddit] = None,    # inject shared client
+        write_report: bool = True,                   # allow caller to suppress per-run JSON
     ):
         self.subreddits = subreddits
         self.search_terms = search_terms or []
@@ -44,6 +57,9 @@ class DownloaderPipeline:
 
         self._owns_reddit = external_reddit is None
         self.close_on_exit = close_on_exit
+        self.write_report = write_report
+
+        self._last_summary: Optional[RunSummary] = None
 
     async def run(self) -> int:
         saved_count = 0
@@ -74,7 +90,8 @@ class DownloaderPipeline:
 
             if not posts:
                 logger.info("No posts fetched by downloader pipeline.")
-                self._print_and_write_report(outcomes, fetched=0)
+                summary = self._build_summary(outcomes, fetched=0)
+                self._finalize_report(summary)
                 return 0
 
             # Build collection folder from subreddit + search terms
@@ -105,7 +122,7 @@ class DownloaderPipeline:
                             outcomes.append({
                                 **post_info,
                                 "status": "failed",
-                                "reason": "gallery had 0 valid items (no usable media_metadata)"
+                                "reason": "gallery had 0 valid items (no usable media_metadata)",
                             })
                     elif result:
                         saved_count += 1
@@ -114,7 +131,7 @@ class DownloaderPipeline:
                         outcomes.append({
                             **post_info,
                             "status": "failed",
-                            "reason": "no media resolved (not image/video or resolver declined)"
+                            "reason": "no media resolved (not image/video or resolver declined)",
                         })
 
                 except FileNotFoundError as e:
@@ -129,7 +146,8 @@ class DownloaderPipeline:
                     outcomes.append({**post_info, "status": "failed", "reason": str(e)})
                     logger.error(f"Error saving post {post_info['id']}: {e}", exc_info=True)
 
-            self._print_and_write_report(outcomes, fetched=len(posts))
+            summary = self._build_summary(outcomes, fetched=len(posts))
+            self._finalize_report(summary)
             return saved_count
 
         finally:
@@ -146,39 +164,52 @@ class DownloaderPipeline:
                     except Exception:
                         pass
 
-    def _print_and_write_report(self, outcomes: List[Dict[str, Any]], fetched: int) -> None:
-        saved = sum(1 for o in outcomes if o["status"] == "saved")
-        failed = [o for o in outcomes if o["status"] == "failed"]
-        skipped = [o for o in outcomes if o["status"] == "skipped"]
+    def last_summary(self) -> Optional[RunSummary]:
+        return self._last_summary
 
+    # ---- helpers -------------------------------------------------------------
+
+    def _build_summary(self, outcomes: List[Dict[str, Any]], fetched: int) -> RunSummary:
+        saved = sum(1 for o in outcomes if o["status"] == "saved")
+        skipped = sum(1 for o in outcomes if o["status"] == "skipped")
+        failed = sum(1 for o in outcomes if o["status"] == "failed")
+        return RunSummary(fetched=fetched, saved=saved, skipped=skipped, failed=failed, outcomes=outcomes)
+
+    def _print_summary(self, s: RunSummary) -> None:
         print()
         print("=== Download Report ===")
-        print(f"Fetched posts: {fetched}")
-        print(f"Saved: {saved}")
-        print(f"Skipped (exists): {len(skipped)}")
-        print(f"Failed: {len(failed)}")
-        if failed:
+        print(f"Fetched posts: {s.fetched}")
+        print(f"Saved: {s.saved}")
+        print(f"Skipped (exists): {s.skipped}")
+        print(f"Failed: {s.failed}")
+        if s.failed:
             print("\nFailures (id → reason):")
-            for o in failed:
+            for o in (x for x in s.outcomes if x["status"] == "failed"):
                 print(f" - {o.get('id')}: {o.get('reason')}")
 
-        # Optionally write a JSON run report (disabled by default)
-        if WRITE_RUN_REPORT_JSON:
+    def _write_report(self, s: RunSummary) -> None:
+        try:
+            REPORT_DIR.mkdir(parents=True, exist_ok=True)  # ensure dir exists
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            report_path = (REPORT_DIR / f"report_{ts}.json")
-            try:
-                import json
-                data = {
-                    "root": str(OUTPUT_ROOT),
-                    "fetched": fetched,
-                    "saved": saved,
-                    "skipped": len(skipped),
-                    "failed": len(failed),
-                    "outcomes": outcomes,
-                    "created_at": ts,
-                }
-                with open(report_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                print(f"\nReport written to: {report_path}")
-            except Exception as e:
-                logger.warning(f"Could not write report JSON: {e}")
+            report_path = REPORT_DIR / f"report_{ts}.json"
+            import json  # local import to avoid import at module load time
+            data = {
+                "root": str(OUTPUT_ROOT),
+                "fetched": s.fetched,
+                "saved": s.saved,
+                "skipped": s.skipped,
+                "failed": s.failed,
+                "outcomes": s.outcomes,
+                "created_at": ts,
+            }
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"\nReport written to: {report_path}")
+        except Exception as e:
+            logger.warning(f"Could not write report JSON: {e}")
+
+    def _finalize_report(self, summary: RunSummary) -> None:
+        self._last_summary = summary
+        self._print_summary(summary)
+        if self.write_report and WRITE_RUN_REPORT_JSON:
+            self._write_report(summary)
