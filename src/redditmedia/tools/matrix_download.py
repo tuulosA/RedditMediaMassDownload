@@ -10,7 +10,7 @@ from ..redditcommand.config import RedditClientManager
 # ========================= BINARY MODE TOGGLES =========================
 # True  = use idol search terms (DEFAULT_IDOLS) against HUB_SUB.
 # False = ignore search terms entirely and fetch directly from subs list below.
-USE_SEARCH_TERMS = False
+USE_SEARCH_TERMS = True
 
 # When USE_SEARCH_TERMS == False:
 #   True  => use PERSONAL_GROUP_SUBS (group-oriented subs)
@@ -82,12 +82,12 @@ PERSONAL_GROUP_SUBS = [
 ]
 
 # Time filters
-#DEFAULT_TIMES = ["day"]
+DEFAULT_TIMES = ["day"]
 #DEFAULT_TIMES = ["week"]
 #DEFAULT_TIMES = ["day", "week"]
 #DEFAULT_TIMES = ["week", "month", "year"]
 #DEFAULT_TIMES = ["week", "month", "year", "all"]
-DEFAULT_TIMES = ["year", "all"]
+#DEFAULT_TIMES = ["year", "all"]
 #DEFAULT_TIMES = ["all"]
 
 def parse_args() -> argparse.Namespace:
@@ -99,7 +99,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--idols", "-i", nargs="+", default=DEFAULT_IDOLS,
                    help="Search terms (used only if USE_SEARCH_TERMS=True)")
     p.add_argument("--times", "-t", nargs="+", default=DEFAULT_TIMES, help="Time filters")
-    p.add_argument("--count", "-n", type=int, default=20, help="Number of media to fetch per combo")
+    p.add_argument("--count", "-n", type=int, default=50, help="Number of media to fetch per combo")
     p.add_argument("--type", choices=["image", "video"], default=None, help="Media type filter")
     p.add_argument("--sleep", type=float, default=0.0, help="Sleep seconds between combos")
     p.add_argument("--sort", choices=["top", "hot"], default="top", help="Sort mode")
