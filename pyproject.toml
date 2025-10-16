@@ -9,7 +9,7 @@ description = "Telegram bot + Reddit mass downloader"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Your Name" }]
+authors = [{ name = "skroom" }]
 
 dependencies = [
   "asyncpraw",
