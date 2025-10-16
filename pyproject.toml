@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "redditmedia"
+version = "0.1.0"
+description = "Telegram bot + Reddit mass downloader"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Your Name" }]
+
+dependencies = [
+  "asyncpraw",
+  "aiohttp",
+  "python-dotenv",
+  "opencv-python",
+  "pillow",
+  "redgifs",
+  "yt-dlp",
+]
+
+[project.optional-dependencies]
+telegram = ["python-telegram-bot[job-queue]>=21"]
+dev = ["pytest", "ruff", "mypy", "pre-commit"]
+
+[project.scripts]
+redditmedia-bot = "redditmedia.__main__:main"
+redditmedia-download = "redditmedia.reddit_mass_downloader.cli:main"
+redditmedia-matrix = "redditmedia.tools.matrix_download:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/redditmedia"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/redditmedia",
+  "README.md",
+  "pyproject.toml"
+]
