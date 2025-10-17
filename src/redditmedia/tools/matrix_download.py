@@ -153,7 +153,7 @@ PERSONAL_GROUP_SUBS = [
 ]
 
 # Time filters
-DEFAULT_TIMES = ["day"]
+DEFAULT_TIMES = ["week"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -181,7 +181,7 @@ def parse_args() -> argparse.Namespace:
                    help="Search terms (used only with --use-terms).")
     p.add_argument("--times", "-t", nargs="+", default=DEFAULT_TIMES,
                    help="Time filters: day, week, month, year, all (default: day).")
-    p.add_argument("--count", "-n", type=int, default=50,
+    p.add_argument("--count", "-n", type=int, default=5,
                    help="Number of media to fetch per combo (default: 50).")
     p.add_argument("--type", choices=["image", "video"], default=None,
                    help="Media type filter (default: any).")
