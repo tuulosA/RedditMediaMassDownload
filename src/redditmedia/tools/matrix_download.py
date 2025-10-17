@@ -10,16 +10,85 @@ from ..reddit_mass_downloader.config_overrides import REPORT_DIR, OUTPUT_ROOT
 from ..redditcommand.utils.session import GlobalSession
 from ..redditcommand.config import RedditClientManager
 
-# ========================= BINARY MODE TOGGLES =========================
-# True  = use idol search terms (DEFAULT_IDOLS) against HUB_SUB.
-# False = ignore search terms entirely and fetch directly from subs list below.
-USE_SEARCH_TERMS = True
+r"""
+Matrix downloader for idols × subreddit × time.
 
-# When USE_SEARCH_TERMS == False:
-#   True  => use PERSONAL_GROUP_SUBS (group-oriented subs)
-#   False => use PERSONAL_SUBS (idol-specific subs)
-USE_GROUP_SUBS = True
-# ======================================================================
+This module orchestrates a grid of download “combos” and writes a single
+unified JSON report at the end. A combo is:
+    (subreddit) × (search term or no term) × (time filter) × (media type) × (sort)
+
+Runtime behavior is **entirely CLI-driven**:
+  - Choose whether to use search terms with: --use-terms / --no-terms
+  - When not using terms *and* you don't pass --subs, choose the default pool with:
+      --group-subs (group-oriented subs) or --idol-subs (idol-specific subs)
+
+Key runtime pieces:
+  - DownloaderPipeline: executes each combo and tracks a summary.
+  - GlobalSession / RedditClientManager: shared HTTP/Reddit clients.
+  - REPORT_DIR and OUTPUT_ROOT (from config_overrides): control output paths.
+
+Outputs:
+  - Media is downloaded beneath OUTPUT_ROOT (pipeline/config decides exact layout).
+  - A single unified report JSON is written to REPORT_DIR as:
+      matrix_report_YYYYMMDD_HHMMSS.json
+    containing total fetched/saved/skipped/failed and per-item outcomes,
+    including the combo tags used to fetch them.
+
+CLI:
+    python -m redditmedia.tools.matrix_download [options]
+    python redditmedia/tools/matrix_download.py [options]
+
+Important options:
+  --use-terms / --no-terms
+      Whether to search with idol terms. (default: --use-terms)
+  --group-subs / --idol-subs
+      Only used when not using terms AND you didn't pass --subs.
+      Picks between default group-oriented subs vs idol-specific ones.
+      (default: --group-subs)
+  --subs/-s
+      One or more subreddits to target (overrides default pools).
+  --idols/-i
+      Idol search terms (used only if --use-terms).
+  --times/-t
+      One or more time filters: day, week, month, year, all. (default: day)
+  --count/-n
+      Number of media to fetch per combo (default: 50).
+  --type
+      Media type filter: image | video (default: any).
+  --sort
+      top | hot (default: top).
+  --sleep
+      Seconds to sleep between combos (default: 0).
+  --strict-single
+      Error if more than one subreddit is provided.
+
+Examples:
+  # Default: use idol terms against the hub sub, day/top, 50 per combo
+  python -m redditmedia.tools.matrix_download --use-terms
+
+  # Use specific subs WITHOUT idol terms (keep default count=50)
+  python -m redditmedia.tools.matrix_download --no-terms --subs tzuyu TzuyuTWICE
+
+  # Use specific subs WITHOUT idol terms for day and week (keep default count=50)
+  python -m redditmedia.tools.matrix_download --no-terms --subs tzuyu TzuyuTWICE --times day week
+
+  # Use specific search terms for specific subs for day and week (keep default count=50)
+  python -m redditmedia.tools.matrix_download --idols tzuyu --subs twicensfw twicexnice --times day week
+
+  # No terms; let tool pick default GROUP subs
+  python -m redditmedia.tools.matrix_download --no-terms --group-subs
+
+  # No terms; pick idol-specific default subs
+  python -m redditmedia.tools.matrix_download --no-terms --idol-subs
+
+  # Video-only, week+month, 150 per combo
+  python -m redditmedia.tools.matrix_download --type video --times week month --count 150
+
+  # Guarded single-sub run
+  python -m redditmedia.tools.matrix_download --subs kpopfap --strict-single
+"""
+
+# ----------------------------- Defaults --------------------------------
 
 # Idol search terms
 DEFAULT_IDOLS = [
@@ -41,10 +110,10 @@ DEFAULT_IDOLS = [
     "eunbi", "somi",
 ]
 
-# Hub sub (use with idol search terms)
+# Hub sub (used when --use-terms and no --subs)
 HUB_SUB = "kpopfap"
 
-# Personal/group subs (used when not using idol terms)
+# Default pools used only when --no-terms AND no --subs were provided.
 PERSONAL_SUBS = [
     # TWICE
     "myouimina", "nayeon", "jeongyeon", "momo", "sana", "jihyo", "dahyun", "chaeyoung", "tzuyu", "TzuyuTWICE",
@@ -64,7 +133,6 @@ PERSONAL_SUBS = [
     "kwon_eunbi", "somi", "somi_nsfw",
 ]
 
-# Personal/group subs (used when not using idol terms)
 PERSONAL_GROUP_SUBS = [
     # TWICE
     "twicensfw", "twicexnice", "twice_hotties", "twicemedia",
@@ -86,29 +154,46 @@ PERSONAL_GROUP_SUBS = [
 
 # Time filters
 DEFAULT_TIMES = ["day"]
-#DEFAULT_TIMES = ["week"]
-#DEFAULT_TIMES = ["day", "week"]
-#DEFAULT_TIMES = ["week", "month", "year"]
-#DEFAULT_TIMES = ["week", "month", "year", "all"]
-#DEFAULT_TIMES = ["year", "all"]
-#DEFAULT_TIMES = ["all"]
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser("Matrix downloader for idols × subreddit × time (single-sub runs)")
-    # NOTE: no CLI for picking idol vs group when no-terms; it's hard-coded above.
+    p = argparse.ArgumentParser("Matrix downloader for idols × subreddit × time")
 
+    # Mode selection (all runtime-configurable)
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--use-terms", dest="use_terms", action="store_true", default=True,
+                       help="Search using idol terms (default).")
+    group.add_argument("--no-terms", dest="use_terms", action="store_false",
+                       help="Do NOT use search terms.")
+
+    pool = p.add_mutually_exclusive_group()
+    pool.add_argument("--group-subs", dest="use_group_subs", action="store_true", default=True,
+                      help="When not using terms and no --subs, use group-oriented subs (default).")
+    pool.add_argument("--idol-subs", dest="use_group_subs", action="store_false",
+                      help="When not using terms and no --subs, use idol-specific subs.")
+
+    # Scope
     p.add_argument("--subs", "-s", nargs="+", default=None,
-                   help="Override default subs (optional).")
+                   help="Target these subreddits (overrides default pools).")
+
+    # Term/time/media controls
     p.add_argument("--idols", "-i", nargs="+", default=DEFAULT_IDOLS,
-                   help="Search terms (used only if USE_SEARCH_TERMS=True)")
-    p.add_argument("--times", "-t", nargs="+", default=DEFAULT_TIMES, help="Time filters")
-    p.add_argument("--count", "-n", type=int, default=50, help="Number of media to fetch per combo")
-    p.add_argument("--type", choices=["image", "video"], default=None, help="Media type filter")
-    p.add_argument("--sleep", type=float, default=0.0, help="Sleep seconds between combos")
-    p.add_argument("--sort", choices=["top", "hot"], default="top", help="Sort mode")
+                   help="Search terms (used only with --use-terms).")
+    p.add_argument("--times", "-t", nargs="+", default=DEFAULT_TIMES,
+                   help="Time filters: day, week, month, year, all (default: day).")
+    p.add_argument("--count", "-n", type=int, default=50,
+                   help="Number of media to fetch per combo (default: 50).")
+    p.add_argument("--type", choices=["image", "video"], default=None,
+                   help="Media type filter (default: any).")
+    p.add_argument("--sort", choices=["top", "hot"], default="top",
+                   help="Sort mode (default: top).")
+    p.add_argument("--sleep", type=float, default=0.0,
+                   help="Sleep seconds between combos (default: 0).")
+
+    # Safety
     p.add_argument("--strict-single", action="store_true",
-                   help="Error if more than one subreddit is provided")
+                   help="Error if more than one subreddit is provided.")
+
     return p.parse_args()
 
 
@@ -116,20 +201,23 @@ async def run_matrix(ns: argparse.Namespace) -> None:
     if ns.strict_single and len(ns.subs or []) != 1:
         raise SystemExit("With --strict-single, provide exactly one subreddit via --subs.")
 
-    # Choose defaults based on hard-coded booleans if --subs not provided
+    # Decide subreddits if not explicitly provided
     if not ns.subs:
-        ns.subs = [HUB_SUB] if USE_SEARCH_TERMS else (PERSONAL_GROUP_SUBS if USE_GROUP_SUBS else PERSONAL_SUBS)
+        if ns.use_terms:
+            ns.subs = [HUB_SUB]
+        else:
+            ns.subs = PERSONAL_GROUP_SUBS if ns.use_group_subs else PERSONAL_SUBS
+
+    # Derive human-readable mode string
+    if ns.use_terms:
+        mode_str = "IDOL TERMS → HUB SUBS (or --subs if provided)"
+    else:
+        mode_str = f"NO TERMS → {'GROUP SUBS' if ns.use_group_subs else 'IDOL-SPECIFIC SUBS'} (or --subs if provided)"
+    print(f"\n=== MODE: {mode_str} ===")
 
     grand_total = 0
     combos = 0
     t0 = perf_counter()
-
-    if USE_SEARCH_TERMS:
-        mode_str = "IDOL TERMS → HUB SUBS"
-    else:
-        scope = "GROUP SUBS" if USE_GROUP_SUBS else "IDOL-SPECIFIC SUBS"
-        mode_str = f"NO TERMS → {scope}"
-    print(f"\n=== MODE: {mode_str} ===")
 
     # Aggregation containers for unified report
     all_outcomes: List[Dict[str, Any]] = []
@@ -140,8 +228,8 @@ async def run_matrix(ns: argparse.Namespace) -> None:
 
     try:
         for sub in ns.subs:
-            # Use idol terms list or a single None sentinel (no terms)
-            term_list: List[Optional[str]] = (ns.idols if USE_SEARCH_TERMS else [None])
+            # Search terms vs sentinel
+            term_list: List[Optional[str]] = (ns.idols if ns.use_terms else [None])
 
             for term in term_list:
                 for tf in ns.times:
@@ -153,15 +241,16 @@ async def run_matrix(ns: argparse.Namespace) -> None:
 
                     pipe = DownloaderPipeline(
                         subreddits=[sub],
-                        search_terms=([term] if (USE_SEARCH_TERMS and term is not None) else []),
+                        search_terms=([term] if (ns.use_terms and term is not None) else []),
                         sort=ns.sort,
                         time_filter=tf,
                         media_type=ns.type,
                         media_count=ns.count,
                         close_on_exit=False,
                         external_reddit=reddit,
-                        write_report=False,  # suppress per-run JSON; we’ll write one unified report
+                        write_report=False,  # we’ll write one unified report
                     )
+
                     saved = await pipe.run()
                     combos += 1
                     grand_total += saved
@@ -176,7 +265,7 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                         grand_failed += summary.failed
                         combo_tag = {
                             "subreddits": [sub],
-                            "search_terms": ([term] if (USE_SEARCH_TERMS and term is not None) else []),
+                            "search_terms": ([term] if (ns.use_terms and term is not None) else []),
                             "time_filter": tf,
                             "media_type": ns.type,
                             "sort": ns.sort,
@@ -187,6 +276,7 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                     if ns.sleep > 0:
                         await asyncio.sleep(ns.sleep)
     finally:
+        # Close shared sessions/clients
         try:
             await GlobalSession.close()
         except Exception:
