@@ -225,7 +225,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pick", choices=["top", "random"], default="top",
                    help="How to pick among filtered posts: highest scores first (top) or random (default: top).")
     p.add_argument("--blacklist", "-B", nargs="+", default=[
-        "lovelyz", "fromis", "rose_queen", "rose queen", "gugudan", "AOA", "tripleS"
+        "lovelyz", "fromis", "rose_queen", "rose queen", "gugudan", "AOA", "tripleS", "kang"
     ], help="Case-insensitive title keywords/phrases to exclude (space/underscore variants are treated the same).")
     p.add_argument("--sleep", type=float, default=0.0,
                    help="Sleep seconds between combos (default: 0).")
