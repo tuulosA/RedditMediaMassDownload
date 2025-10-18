@@ -2,7 +2,6 @@ __pycache__/
 .vs/
 .idea/
 .env
-print.txt
 logs/*.log
 auto_posts/*
 followed_users.json
@@ -11,8 +10,3 @@ follower_map.json
 user_filters.json
 followed_subreddit.json
 htmlcov
-list_modules.py
-core.txt
-utils.txt
-downloader.txt
-automatic_posts.txt

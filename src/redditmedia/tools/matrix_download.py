@@ -72,6 +72,15 @@ Examples:
   # Default settings with minimum score of 200
   python -m redditmedia.tools.matrix_download --min-score 200
 
+  # all-subs with min score
+  python -m redditmedia.tools.matrix_download --all-subs --min-score 2000
+
+  # all-subs with min score for time filter year and all-time
+  python -m redditmedia.tools.matrix_download --all-subs --min-score 2000 --times year all
+  
+  # No terms; combine BOTH pools (group + idol-specific)
+  python -m redditmedia.tools.matrix_download --no-terms --all-subs
+
   # Default: use idol terms against the hub sub, week/top, 5 per combo
   python -m redditmedia.tools.matrix_download --use-terms
 
@@ -102,6 +111,9 @@ Examples:
 
 # ----------------------------- Defaults --------------------------------
 
+# Hub sub (used when --use-terms and no --subs)
+HUB_SUB = "kpopfap"
+
 # Idol search terms
 DEFAULT_IDOLS = [
     # TWICE
@@ -121,9 +133,6 @@ DEFAULT_IDOLS = [
     # Soloists
     "eunbi", "somi",
 ]
-
-# Hub sub (used when --use-terms and no --subs)
-HUB_SUB = "kpopfap"
 
 # Default pools used only when --no-terms AND no --subs were provided.
 PERSONAL_SUBS = [
@@ -179,10 +188,25 @@ def parse_args() -> argparse.Namespace:
                        help="Do NOT use search terms.")
 
     pool = p.add_mutually_exclusive_group()
-    pool.add_argument("--group-subs", dest="use_group_subs", action="store_true", default=True,
-                      help="When not using terms and no --subs, use group-oriented subs (default).")
-    pool.add_argument("--idol-subs", dest="use_group_subs", action="store_false",
-                      help="When not using terms and no --subs, use idol-specific subs.")
+    pool.add_argument(
+        "--group-subs",
+        dest="use_group_subs",
+        action="store_true",
+        default=None,  # <-- important: None means "not explicitly chosen"
+        help="Use group-oriented subs (implies --no-terms if --subs not provided).",
+    )
+    pool.add_argument(
+        "--idol-subs",
+        dest="use_group_subs",
+        action="store_false",
+        help="Use idol-specific subs (implies --no-terms if --subs not provided).",
+    )
+    pool.add_argument(
+        "--all-subs",
+        dest="use_all_subs",
+        action="store_true",
+        help="Use BOTH group and idol-specific subs (implies --no-terms if --subs not provided).",
+    )
 
     # Scope
     p.add_argument("--subs", "-s", nargs="+", default=None,
@@ -217,21 +241,42 @@ def parse_args() -> argparse.Namespace:
 
 
 async def run_matrix(ns: argparse.Namespace) -> None:
+    # If a pool flag was chosen (or all-subs) and the user didn't pass explicit --subs,
+    # force no-terms so we never search on non-hub subs.
+    if ns.subs is None and (getattr(ns, "use_all_subs", False) or ns.use_group_subs is not None):
+        ns.use_terms = False
+
     if ns.strict_single and len(ns.subs or []) != 1:
         raise SystemExit("With --strict-single, provide exactly one subreddit via --subs.")
 
     # Decide subreddits if not explicitly provided
     if not ns.subs:
         if ns.use_terms:
+            # Using terms => hub (kpopfap)
             ns.subs = [HUB_SUB]
         else:
-            ns.subs = PERSONAL_GROUP_SUBS if ns.use_group_subs else PERSONAL_SUBS
+            # No terms => pools
+            if getattr(ns, "use_all_subs", False):
+                # Combine both pools; dedupe while preserving order
+                ns.subs = list(dict.fromkeys(PERSONAL_GROUP_SUBS + PERSONAL_SUBS))
+            else:
+                # If user did not explicitly pick a pool, default to GROUP subs (old behavior)
+                if ns.use_group_subs is None or ns.use_group_subs is True:
+                    ns.subs = PERSONAL_GROUP_SUBS
+                else:
+                    ns.subs = PERSONAL_SUBS
 
     # Derive human-readable mode string
     if ns.use_terms:
         mode_str = "IDOL TERMS → HUB SUBS (or --subs if provided)"
     else:
-        mode_str = f"NO TERMS → {'GROUP SUBS' if ns.use_group_subs else 'IDOL-SPECIFIC SUBS'} (or --subs if provided)"
+        if getattr(ns, "use_all_subs", False):
+            mode_str = "NO TERMS → ALL SUBS (group + idol) (or --subs if provided)"
+        else:
+            # If user didn’t explicitly choose, default label is GROUP SUBS
+            pool_label = "GROUP SUBS" if (ns.use_group_subs is None or ns.use_group_subs is True) else "IDOL-SPECIFIC SUBS"
+            mode_str = f"NO TERMS → {pool_label} (or --subs if provided)"
+
     print(f"\n=== MODE: {mode_str} ===")
 
     grand_total = 0
