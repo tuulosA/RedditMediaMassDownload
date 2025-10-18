@@ -45,6 +45,9 @@ Important options:
       Only used when not using terms AND you didn't pass --subs.
       Picks between default group-oriented subs vs idol-specific ones.
       (default: --group-subs)
+  --mega
+      Combine the default hub × idol matrix with all personal subs (group + idol).
+      Idol terms apply only to the hub; the personal subs are fetched without terms.
   --subs/-s
       One or more subreddits to target (overrides default pools).
   --idols/-i
@@ -104,6 +107,10 @@ Examples:
 
   # Guarded single-sub run
   python -m redditmedia.tools.matrix_download --subs kpopfap --strict-single
+
+  # Mega run: hub × idols + all personal and group subs (no terms)
+  python -m redditmedia.tools.matrix_download --mega --min-score 2500
+  python -m redditmedia.tools.matrix_download --mega --min-score 2500 --times year all
 """
 
 # ----------------------------- Defaults --------------------------------
@@ -204,6 +211,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use BOTH group and idol-specific subs (implies --no-terms if --subs not provided).",
     )
+    pool.add_argument(
+        "--mega",
+        dest="mega",
+        action="store_true",
+        default=False,
+        help=(
+            "Combine the default hub × idol matrix with ALL personal subs (group + idol). "
+            "Runs idol terms only against the hub and omits terms for the personal subs."
+        ),
+    )
 
     # Scope
     p.add_argument("--subs", "-s", nargs="+", default=None,
@@ -238,41 +255,62 @@ def parse_args() -> argparse.Namespace:
 
 
 async def run_matrix(ns: argparse.Namespace) -> None:
+    use_mega = getattr(ns, "mega", False)
+
+    if use_mega and ns.subs:
+        raise SystemExit("--mega cannot be combined with --subs; it always uses the default pools.")
     # If a pool flag was chosen (or all-subs) and the user didn't pass explicit --subs,
-    # force no-terms so we never search on non-hub subs.
-    if ns.subs is None and (getattr(ns, "use_all_subs", False) or ns.use_group_subs is not None):
+    # force no-terms so we never search on non-hub subs. Skip this in mega mode since
+    # it manages its own combo plan.
+    if (not use_mega) and ns.subs is None and (getattr(ns, "use_all_subs", False) or ns.use_group_subs is not None):
         ns.use_terms = False
 
-    if ns.strict_single and len(ns.subs or []) != 1:
-        raise SystemExit("With --strict-single, provide exactly one subreddit via --subs.")
+    if ns.strict_single:
+        if use_mega:
+            raise SystemExit("--strict-single cannot be used together with --mega.")
+        if len(ns.subs or []) != 1:
+            raise SystemExit("With --strict-single, provide exactly one subreddit via --subs.")
+
+    combos_plan: List[Dict[str, Any]] = []
 
     # Decide subreddits if not explicitly provided
-    if not ns.subs:
-        if ns.use_terms:
-            # Using terms => hub (kpopfap)
-            ns.subs = [HUB_SUB]
-        else:
-            # No terms => pools
-            if getattr(ns, "use_all_subs", False):
-                # Combine both pools; dedupe while preserving order
-                ns.subs = list(dict.fromkeys(PERSONAL_GROUP_SUBS + PERSONAL_SUBS))
+    if use_mega:
+        mega_pool = list(dict.fromkeys(PERSONAL_GROUP_SUBS + PERSONAL_SUBS))
+        combos_plan.append({"sub": HUB_SUB, "terms": ns.idols})
+        for sub in mega_pool:
+            combos_plan.append({"sub": sub, "terms": [None]})
+        mode_str = "MEGA MODE → HUB SUB × IDOLS + PERSONAL (group + idol) SUBS"
+    else:
+        if not ns.subs:
+            if ns.use_terms:
+                # Using terms => hub (kpopfap)
+                ns.subs = [HUB_SUB]
             else:
-                # If user did not explicitly pick a pool, default to GROUP subs (old behavior)
-                if ns.use_group_subs is None or ns.use_group_subs is True:
-                    ns.subs = PERSONAL_GROUP_SUBS
+                # No terms => pools
+                if getattr(ns, "use_all_subs", False):
+                    # Combine both pools; dedupe while preserving order
+                    ns.subs = list(dict.fromkeys(PERSONAL_GROUP_SUBS + PERSONAL_SUBS))
                 else:
-                    ns.subs = PERSONAL_SUBS
+                    # If user did not explicitly pick a pool, default to GROUP subs (old behavior)
+                    if ns.use_group_subs is None or ns.use_group_subs is True:
+                        ns.subs = PERSONAL_GROUP_SUBS
+                    else:
+                        ns.subs = PERSONAL_SUBS
+
+        term_list: List[Optional[str]] = (ns.idols if ns.use_terms else [None])
+        combos_plan = [{"sub": sub, "terms": term_list} for sub in ns.subs]
 
     # Derive human-readable mode string
-    if ns.use_terms:
-        mode_str = "IDOL TERMS → HUB SUBS (or --subs if provided)"
-    else:
-        if getattr(ns, "use_all_subs", False):
-            mode_str = "NO TERMS → ALL SUBS (group + idol) (or --subs if provided)"
+    if not use_mega:
+        if ns.use_terms:
+            mode_str = "IDOL TERMS → HUB SUBS (or --subs if provided)"
         else:
-            # If user didn’t explicitly choose, default label is GROUP SUBS
-            pool_label = "GROUP SUBS" if (ns.use_group_subs is None or ns.use_group_subs is True) else "IDOL-SPECIFIC SUBS"
-            mode_str = f"NO TERMS → {pool_label} (or --subs if provided)"
+            if getattr(ns, "use_all_subs", False):
+                mode_str = "NO TERMS → ALL SUBS (group + idol) (or --subs if provided)"
+            else:
+                # If user didn’t explicitly choose, default label is GROUP SUBS
+                pool_label = "GROUP SUBS" if (ns.use_group_subs is None or ns.use_group_subs is True) else "IDOL-SPECIFIC SUBS"
+                mode_str = f"NO TERMS → {pool_label} (or --subs if provided)"
 
     print(f"\n=== MODE: {mode_str} ===")
 
@@ -288,11 +326,9 @@ async def run_matrix(ns: argparse.Namespace) -> None:
     reddit = await RedditClientManager.get_client()
 
     try:
-        for sub in ns.subs:
-            # Search terms vs sentinel
-            term_list: List[Optional[str]] = (ns.idols if ns.use_terms else [None])
-
-            for term in term_list:
+        for combo in combos_plan:
+            sub = combo["sub"]
+            for term in combo["terms"]:
                 for tf in ns.times:
                     human_term = (term if term is not None else "(no terms)")
                     print(
@@ -305,9 +341,11 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                         )
                     )
 
+                    search_terms = [] if term is None else [term]
+
                     pipe = DownloaderPipeline(
                         subreddits=[sub],
-                        search_terms=([term] if (ns.use_terms and term is not None) else []),
+                        search_terms=search_terms,
                         sort=ns.sort,
                         time_filter=tf,
                         media_type=ns.type,
@@ -334,7 +372,7 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                         grand_failed += summary.failed
                         combo_tag = {
                             "subreddits": [sub],
-                            "search_terms": ([term] if (ns.use_terms and term is not None) else []),
+                            "search_terms": search_terms,
                             "time_filter": tf,
                             "media_type": ns.type,
                             "sort": ns.sort,
