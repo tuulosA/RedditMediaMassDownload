@@ -119,6 +119,11 @@ class DownloaderPipeline:
                     "subreddit": getattr(getattr(post, "subreddit", None), "display_name", None),
                     "title": getattr(post, "title", None),
                     "url": getattr(post, "url", None),
+                    "score": getattr(post, "score", None),          # <-- NEW: include score in report
+                    # (optional extras if you want them, uncomment as needed)
+                    "upvote_ratio": getattr(post, "upvote_ratio", None),
+                    "num_comments": getattr(post, "num_comments", None),
+                    "created_utc": getattr(post, "created_utc", None),
                 }
                 try:
                     result = await saver.save_post(post)
