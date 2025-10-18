@@ -43,6 +43,7 @@ class DownloaderPipeline:
         media_count: int = 1,
         min_score: Optional[int] = None,
         pick_mode: str = "top",
+        blacklist_terms: Optional[List[str]] = None,
         close_on_exit: bool = True,                  # keep False when looping
         external_reddit: Optional[Reddit] = None,    # inject shared client
         write_report: bool = True,                   # allow caller to suppress per-run JSON
@@ -55,6 +56,7 @@ class DownloaderPipeline:
         self.media_count = media_count
         self.min_score = min_score
         self.pick_mode = (pick_mode or "top").lower()
+        self.blacklist_terms = blacklist_terms or []
 
         self.reddit: Optional[Reddit] = external_reddit
         self.fetcher: Optional[MediaPostFetcher] = None
@@ -89,6 +91,7 @@ class DownloaderPipeline:
                 media_count=self.media_count,
                 min_score=self.min_score,
                 pick_mode=self.pick_mode,
+                blacklist_terms=self.blacklist_terms,
                 update=None,
                 invalid_subreddits=set(),
                 processed_urls=set(),

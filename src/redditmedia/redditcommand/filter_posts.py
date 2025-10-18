@@ -19,13 +19,15 @@ class MediaPostFilter:
         media_count: int = 1,
         processed_urls: Optional[Set[str]] = None,
         min_score: Optional[int] = None,
-        pick_mode: str = "top",  # "top" or "random"
+        blacklist_terms: Optional[List[str]] = None,
+        pick_mode: str = "top",
     ):
         self.subreddit_name = subreddit_name
         self.media_type = media_type
         self.media_count = media_count
         self.processed_urls = processed_urls or set()
         self.min_score = min_score
+        self.blacklist_terms = blacklist_terms or []
         self.pick_mode = (pick_mode or "top").lower()
 
     async def filter(self, posts: List[Submission]) -> List[Submission]:
@@ -50,6 +52,7 @@ class MediaPostFilter:
                 self.processed_urls,
                 self.media_type,
                 min_score=self.min_score,
+                blacklist_terms=self.blacklist_terms,
             )
             if reason:
                 skipped[reason] += 1

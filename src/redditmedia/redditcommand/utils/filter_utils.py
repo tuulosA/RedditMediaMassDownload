@@ -1,7 +1,7 @@
 # redditcommand/utils/filter_utils.py
 
 import re
-from typing import Optional, Set
+from typing import Optional, Set, List
 from asyncpraw.models import Submission
 
 from .url_utils import is_valid_media_url, matches_media_type
@@ -38,14 +38,16 @@ class FilterUtils:
         )
 
     @staticmethod
-    def should_skip(
+    def should_skip( 
         post: Submission,
         processed_urls: Set[str],
         media_type: Optional[str],
         min_score: Optional[int] = None,
+        blacklist_terms: Optional[List[str]] = None,
     ) -> Optional[str]:
         url = post.url or ""
         reason = None
+        title = (getattr(post, "title", "") or "").casefold()
 
         if not url or not is_valid_media_url(url):
             reason = SkipReasons.NON_MEDIA
@@ -57,6 +59,22 @@ class FilterUtils:
             reason = SkipReasons.WRONG_TYPE
         elif min_score is not None and isinstance(getattr(post, "score", None), int) and post.score < min_score:
             reason = SkipReasons.LOW_SCORE
+        elif blacklist_terms:
+            # Case-insensitive title blacklist. Treat "rose queen" and "rose_queen" the same.
+            # Also collapse repeated whitespace to catch odd spacing.
+            import re
+            norm_title = re.sub(r"\s+", " ", title.replace("_", " ")).strip()
+            for raw in blacklist_terms:
+                term = (raw or "").casefold().strip()
+                if not term:
+                    continue
+                # Match either exact word/phrase boundaries or simple substring for multiword labels.
+                term_spaces = term.replace("_", " ")
+                # Build a safe word-boundary regex for the term-as-words
+                pattern = r"\b" + re.escape(term_spaces) + r"\b"
+                if re.search(pattern, norm_title) or term in title or term_spaces in norm_title:
+                    reason = SkipReasons.BLACKLISTED
+                    break
 
         if reason:
             skip_logger.info(

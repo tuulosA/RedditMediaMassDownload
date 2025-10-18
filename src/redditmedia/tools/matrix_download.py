@@ -203,6 +203,9 @@ def parse_args() -> argparse.Namespace:
                    help="Skip posts with score (upvotes) below this number.")
     p.add_argument("--pick", choices=["top", "random"], default="top",
                    help="How to pick among filtered posts: highest scores first (top) or random (default: top).")
+    p.add_argument("--blacklist", "-B", nargs="+", default=[
+        "lovelyz", "fromis", "rose_queen", "rose queen", "gugudan", "AOA", "tripleS"
+    ], help="Case-insensitive title keywords/phrases to exclude (space/underscore variants are treated the same).")
     p.add_argument("--sleep", type=float, default=0.0,
                    help="Sleep seconds between combos (default: 0).")
 
@@ -251,10 +254,13 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                 for tf in ns.times:
                     human_term = (term if term is not None else "(no terms)")
                     print(
-                        f"\n=== Running combo: sub={sub} | term={human_term} | "
-                        f"time={tf} | count={ns.count} | type={ns.type or 'any'} ==="
-                        + (f" | min_score={ns.min_score}" if ns.min_score is not None else "")
-                        + f" | pick={ns.pick}"
+                        (
+                            f"\n=== Running combo: sub={sub} | term={human_term} | "
+                            f"time={tf} | sort={ns.sort} | count={ns.count} | type={ns.type or 'any'} ==="
+                            f"{f' | min_score={ns.min_score}' if ns.min_score is not None else ''}"
+                            f" | pick={ns.pick}"
+                            f"{f' | blacklist={len(ns.blacklist)} terms' if getattr(ns, 'blacklist', None) else ''}"
+                        )
                     )
 
                     pipe = DownloaderPipeline(
@@ -266,6 +272,7 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                         media_count=ns.count,
                         min_score=ns.min_score,
                         pick_mode=ns.pick,
+                        blacklist_terms=ns.blacklist,
                         close_on_exit=False,
                         external_reddit=reddit,
                         write_report=False,  # we’ll write one unified report
