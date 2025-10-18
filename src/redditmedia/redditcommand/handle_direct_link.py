@@ -323,117 +323,117 @@ class MediaLinkResolver:
             logger.error(f"Streamable error: {e}", exc_info=True)
         return None
 
-async def _redgifs(self, media_url: str, post: Optional[Submission]) -> Optional[str]:
-    """
-    Resolve a Redgifs URL robustly:
-      - Normalize and extract the gif id
-      - Login once
-      - Retry get_gif() on transient statuses (429, 5xx, 503 AuthorizationServiceUnavailable)
-      - Re-login on 401/403 once
-      - Treat 404/410 as missing (raise FileNotFoundError so caller can report)
-      - On repeated transient failures, return None (skip post)
-    """
-    try:
-        # Normalize again defensively (cheap)
-        media_url = self._normalize_media_url(media_url)
-
-        parts = urlsplit(media_url)
-        path = parts.path or "/"
-
-        # Accept /watch/<id>, /ifr/<id>, or /<id>
-        m = re.search(r"/(?:watch|ifr)/([a-z0-9]+)", path, flags=re.I)
-        if m:
-            gif_id = m.group(1)
-        else:
-            segs = [p for p in path.split("/") if p]
-            gif_id = segs[-1] if segs else ""
-
-        if not gif_id or any(c in gif_id for c in "/?#&"):
-            logger.warning(f"Invalid RedGifs id from URL: {media_url}")
-            return None
-
-        api = RedGifsAPI()
+    async def _redgifs(self, media_url: str, post: Optional[Submission]) -> Optional[str]:
+        """
+        Resolve a Redgifs URL robustly:
+        - Normalize and extract the gif id
+        - Login once
+        - Retry get_gif() on transient statuses (429, 5xx, 503 AuthorizationServiceUnavailable)
+        - Re-login on 401/403 once
+        - Treat 404/410 as missing (raise FileNotFoundError so caller can report)
+        - On repeated transient failures, return None (skip post)
+        """
         try:
-            await api.login()
+            # Normalize again defensively (cheap)
+            media_url = self._normalize_media_url(media_url)
 
-            max_retries = 5
-            backoff_base = 1.5
-            gif = None
+            parts = urlsplit(media_url)
+            path = parts.path or "/"
 
-            for attempt in range(max_retries):
-                try:
-                    gif = await api.get_gif(gif_id)
-                    break  # success
-                except RedgifsHTTPError as e:
-                    # status is not always present; try both spots
-                    status = getattr(e, "status", None) or getattr(getattr(e, "response", None), "status", None)
-                    msg = (str(e) or "").lower()
+            # Accept /watch/<id>, /ifr/<id>, or /<id>
+            m = re.search(r"/(?:watch|ifr)/([a-z0-9]+)", path, flags=re.I)
+            if m:
+                gif_id = m.group(1)
+            else:
+                segs = [p for p in path.split("/") if p]
+                gif_id = segs[-1] if segs else ""
 
-                    # Permanent: deleted / not found
-                    if status == 410 or "gifdeleted" in msg or "gone" in msg:
-                        raise FileNotFoundError("redgifs: deleted (410)") from e
-                    if status == 404:
-                        raise FileNotFoundError("redgifs: not found (404)") from e
-
-                    # Token/perm hiccup: try re-login once per failure then retry
-                    if status in (401, 403):
-                        try:
-                            await api.login()
-                        except Exception:
-                            pass
-                        await asyncio.sleep(1.0)
-                        continue
-
-                    # Transient: rate/servers/down
-                    if status in (429, 500, 502, 503, 504) or status is None:
-                        await asyncio.sleep(min(30.0, (backoff_base ** attempt)))
-                        continue
-
-                    # Unknown / non-retryable → skip this post
-                    logger.warning("Redgifs non-retryable error %s on %s: %s", status, gif_id, e)
-                    return None
-                except Exception as e:
-                    # Network/JSON/etc — treat as transient
-                    await asyncio.sleep(min(30.0, (backoff_base ** attempt)))
-
-            if gif is None:
-                logger.warning("Redgifs still failing after %d retries; skipping %s", max_retries, gif_id)
+            if not gif_id or any(c in gif_id for c in "/?#&"):
+                logger.warning(f"Invalid RedGifs id from URL: {media_url}")
                 return None
 
-            # Choose a downloadable URL
-            url = (
-                getattr(gif.urls, "hd", None)
-                or getattr(gif.urls, "sd", None)
-                or getattr(gif.urls, "file_url", None)
-            )
-            if not url:
-                raise FileNotFoundError("redgifs: no downloadable URL")
-
-            # Ensure `post` exists for naming
-            if post is None:
-                class _Stub: pass
-                post = _Stub()
-                setattr(post, "id", TempFileManager.extract_post_id_from_url(media_url) or "unknown")
-                setattr(post, "title", "video")
-                class _Sub: pass
-                sub = _Sub(); setattr(sub, "display_name", "unknown")
-                setattr(post, "subreddit", sub)
-
-            file_path = temp_path_for_generic(post, ext=".mp4", prefix="reddit_redgifs_")
-            return await MediaDownloader.download_file(url, file_path, session=self.session)
-
-        finally:
+            api = RedGifsAPI()
             try:
-                await api.close()
-            except Exception:
-                pass
+                await api.login()
 
-    except FileNotFoundError:
-        # allow 404/410 to bubble to caller (so the pipeline can log a clean "not found")
-        raise
-    except Exception as e:
-        logger.error(f"RedGifs error: {e}", exc_info=True)
-    return None
+                max_retries = 5
+                backoff_base = 1.5
+                gif = None
+
+                for attempt in range(max_retries):
+                    try:
+                        gif = await api.get_gif(gif_id)
+                        break  # success
+                    except RedgifsHTTPError as e:
+                        # status is not always present; try both spots
+                        status = getattr(e, "status", None) or getattr(getattr(e, "response", None), "status", None)
+                        msg = (str(e) or "").lower()
+
+                        # Permanent: deleted / not found
+                        if status == 410 or "gifdeleted" in msg or "gone" in msg:
+                            raise FileNotFoundError("redgifs: deleted (410)") from e
+                        if status == 404:
+                            raise FileNotFoundError("redgifs: not found (404)") from e
+
+                        # Token/perm hiccup: try re-login once per failure then retry
+                        if status in (401, 403):
+                            try:
+                                await api.login()
+                            except Exception:
+                                pass
+                            await asyncio.sleep(1.0)
+                            continue
+
+                        # Transient: rate/servers/down
+                        if status in (429, 500, 502, 503, 504) or status is None:
+                            await asyncio.sleep(min(30.0, (backoff_base ** attempt)))
+                            continue
+
+                        # Unknown / non-retryable → skip this post
+                        logger.warning("Redgifs non-retryable error %s on %s: %s", status, gif_id, e)
+                        return None
+                    except Exception as e:
+                        # Network/JSON/etc — treat as transient
+                        await asyncio.sleep(min(30.0, (backoff_base ** attempt)))
+
+                if gif is None:
+                    logger.warning("Redgifs still failing after %d retries; skipping %s", max_retries, gif_id)
+                    return None
+
+                # Choose a downloadable URL
+                url = (
+                    getattr(gif.urls, "hd", None)
+                    or getattr(gif.urls, "sd", None)
+                    or getattr(gif.urls, "file_url", None)
+                )
+                if not url:
+                    raise FileNotFoundError("redgifs: no downloadable URL")
+
+                # Ensure `post` exists for naming
+                if post is None:
+                    class _Stub: pass
+                    post = _Stub()
+                    setattr(post, "id", TempFileManager.extract_post_id_from_url(media_url) or "unknown")
+                    setattr(post, "title", "video")
+                    class _Sub: pass
+                    sub = _Sub(); setattr(sub, "display_name", "unknown")
+                    setattr(post, "subreddit", sub)
+
+                file_path = temp_path_for_generic(post, ext=".mp4", prefix="reddit_redgifs_")
+                return await MediaDownloader.download_file(url, file_path, session=self.session)
+
+            finally:
+                try:
+                    await api.close()
+                except Exception:
+                    pass
+
+        except FileNotFoundError:
+            # allow 404/410 to bubble to caller (so the pipeline can log a clean "not found")
+            raise
+        except Exception as e:
+            logger.error(f"RedGifs error: {e}", exc_info=True)
+        return None
 
     async def _yt_dlp(self, media_url: str, post: Optional[Submission]) -> Optional[str]:
         # Ensure a post object exists (for subreddit_title_id naming)
