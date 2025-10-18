@@ -213,8 +213,8 @@ def parse_args() -> argparse.Namespace:
                    help="Search terms (used only with --use-terms).")
     p.add_argument("--times", "-t", nargs="+", default=DEFAULT_TIMES,
                    help="Time filters: day, week, month, year, all (default: week).")
-    p.add_argument("--count", "-n", type=int, default=5,
-                   help="Number of media to fetch per combo (default: 5).")
+    p.add_argument("--count", "-n", type=int, default=250,
+                   help="Number of media to fetch per combo (default: 250).")
     p.add_argument("--type", choices=["image", "video"], default=None,
                    help="Media type filter (default: any).")
     p.add_argument("--sort", choices=["top", "hot"], default="top",
