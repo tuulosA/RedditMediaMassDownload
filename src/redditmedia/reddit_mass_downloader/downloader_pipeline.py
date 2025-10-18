@@ -142,10 +142,12 @@ class DownloaderPipeline:
                         saved_count += 1
                         outcomes.append({**post_info, "status": "saved", "path": str(result)})
                     else:
+                        # Resolver returned no URL (e.g., transient Redgifs outage, unsupported host, etc.)
+                        # Treat as SKIPPED so flaky upstreams don’t count as failures.
                         outcomes.append({
                             **post_info,
-                            "status": "failed",
-                            "reason": "no media resolved (not image/video or resolver declined)",
+                            "status": "skipped",
+                            "reason": "resolver returned no URL (transient/unavailable or declined)",
                         })
 
                 except FileNotFoundError as e:
