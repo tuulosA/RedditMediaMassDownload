@@ -134,6 +134,8 @@ DEFAULT_IDOLS = [
     "irene", "seulgi", "wendy", "joy", "yeri",
     # BLACKPINK
     "lisa", "jennie", "rose", "jisoo",
+    # IVE
+    "wonyoung", "rei", "leeseo", "liz", "yujin", "gaeul",
     # Soloists
     "eunbi", "somi",
 ]
@@ -141,21 +143,23 @@ DEFAULT_IDOLS = [
 # Default pools used only when --no-terms AND no --subs were provided.
 PERSONAL_SUBS = [
     # TWICE
-    "myouimina", "nayeon", "jeongyeon", "momo", "sana", "jihyo", "dahyun", "chaeyoung", "tzuyu", "TzuyuTWICE",
+    "myouimina", "nayeon", "jeongyeon", "momo", "momoTWICE", "sana", "jihyo", "ParkJihyo", "dahyun", "chaeyoung", "tzuyu", "TzuyuTWICE",
     # LE SSERAFIM
     "chaewon", "chaewonkim", "sakura", "yunjinhuh", "kazuha", "kazuhanakamura", "hongeunchae", "eunchaehong",
     # ITZY
-    "yeji", "lia", "ryujin", "ryujinitzy", "chaeryeong", "leechaeryeong", "yuna",
+    "yeji", "YejiHwang", "lia", "ryujin", "RyujinITZY", "chaeryeong", "LeeChaeryeong", "yuna", "ShinYuna",
     # aespa
-    "karina", "giselle", "winteraespa", "ningning",
+    "karina", "yoojimin", "giselle", "GiselleNSFW", "winteraespa", "kimminjeong", "ningning", "yizhuoning",
     # (G)I-DLE
-    "miyeon", "chomiyeon", "minniegidle", "soyeon", "yuqi", "shuhua",
+    "miyeon", "ChoMiyeon", "minniegidle", "soyeon", "SoyeonGIDLE", "yuqi", "shuhua", "YehShuhua",
     # Red Velvet
-    "baeirene", "seulgi", "wendyredvelvet", "joy_redvelvet", "yeri",
+    "baeirene", "RedVelvet_Irene", "seulgi", "wendyredvelvet", "joy_redvelvet", "yeri",
     # BLACKPINK
-    "lalisa", "jenniekim", "jennie", "rose", "jisoo",
+    "lalisa", "Lalisa_Manoban", "jenniekim", "jennie", "rose", "jisoo",
+    # IVE
+    "wonyoung", "Wonyoung_IVE", "Rei_IVE", "leeseo", "Leeseo_IVE", "liz", "LIZ_IVE", "yujin", "Yujin_IVE", "gaeul", "Gaeul_IVE", "KimGaeul",
     # Soloists
-    "kwon_eunbi", "somi", "somi_nsfw",
+    "kwon_eunbi", "kwoneunbi", "somi", "somi_nsfw",
 ]
 
 PERSONAL_GROUP_SUBS = [
@@ -173,6 +177,8 @@ PERSONAL_GROUP_SUBS = [
     "GIDLE_Hotties",
     # Red Velvet
     "RedVelvet_Hotties",
+    # IVE
+    "Ive_Hotties",
     # BLACKPINK
     "Blackpink_Hotties",
 ]
