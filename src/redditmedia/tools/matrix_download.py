@@ -77,12 +77,9 @@ Examples:
 
   # all-subs with min score for time filter year and all-time
   python -m redditmedia.tools.matrix_download --all-subs --min-score 2000 --times year all
-  
-  # No terms; combine BOTH pools (group + idol-specific)
-  python -m redditmedia.tools.matrix_download --no-terms --all-subs
 
-  # Default: use idol terms against the hub sub, week/top, 5 per combo
-  python -m redditmedia.tools.matrix_download --use-terms
+  # kpopfap for today but only TWICE
+  python -m redditmedia.tools.matrix_download --use-terms --subs kpopfap --idols mina momo sana tzuyu nayeon dahyun jihyo chaeyoung jeongyeon --times day
 
   # Use specific subs WITHOUT idol terms (keep default count=5)
   python -m redditmedia.tools.matrix_download --no-terms --subs tzuyu TzuyuTWICE
