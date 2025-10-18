@@ -30,6 +30,8 @@ class MediaPostFetcher:
         time_filter: Optional[str] = None,
         media_type: Optional[str] = None,
         media_count: int = 1,
+        min_score: Optional[int] = None,
+        pick_mode: str = "top",
         update=None,
         invalid_subreddits: Optional[Set[str]] = None,
         processed_urls: Optional[Set[str]] = None,
@@ -72,6 +74,8 @@ class MediaPostFetcher:
                     processed_post_ids=processed_post_ids,
                     update=update,
                     processed_urls=processed_urls,
+                    min_score=min_score,
+                    pick_mode=pick_mode,
                 )
                 for s in subs_to_fetch
             ]
@@ -145,6 +149,8 @@ class MediaPostFetcher:
         processed_post_ids: Set[str],
         update,
         processed_urls: Set[str],
+        min_score: Optional[int],
+        pick_mode: str,
     ) -> List[Submission]:
         async with self.semaphore:
             try:
@@ -166,6 +172,8 @@ class MediaPostFetcher:
                     media_type=media_type,
                     media_count=target_count,
                     processed_urls=processed_urls,
+                    min_score=min_score,
+                    pick_mode=pick_mode,
                 )
                 filtered = await filterer.filter(posts)
                 unique = await RedditPostFetcher.filter_duplicates(filtered, processed_post_ids)

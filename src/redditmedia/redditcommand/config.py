@@ -134,6 +134,7 @@ class SkipReasons:
     GFYCAT = "gfycat"
     WRONG_TYPE = "wrong type"
     BLACKLISTED = "blacklisted"
+    LOW_SCORE   = "LOW_SCORE"
 
     @classmethod
     def all(cls) -> list[str]:

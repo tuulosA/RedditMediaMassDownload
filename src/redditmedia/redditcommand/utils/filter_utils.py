@@ -39,7 +39,10 @@ class FilterUtils:
 
     @staticmethod
     def should_skip(
-        post: Submission, processed_urls: Set[str], media_type: Optional[str]
+        post: Submission,
+        processed_urls: Set[str],
+        media_type: Optional[str],
+        min_score: Optional[int] = None,
     ) -> Optional[str]:
         url = post.url or ""
         reason = None
@@ -52,6 +55,8 @@ class FilterUtils:
             reason = SkipReasons.GFYCAT
         elif not matches_media_type(url, media_type):
             reason = SkipReasons.WRONG_TYPE
+        elif min_score is not None and isinstance(getattr(post, "score", None), int) and post.score < min_score:
+            reason = SkipReasons.LOW_SCORE
 
         if reason:
             skip_logger.info(

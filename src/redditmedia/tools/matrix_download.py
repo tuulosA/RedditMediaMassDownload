@@ -48,31 +48,40 @@ Important options:
   --subs/-s
       One or more subreddits to target (overrides default pools).
   --idols/-i
-      Idol search terms (used only if --use-terms).
+      Idol search terms (used only with --use-terms).
   --times/-t
-      One or more time filters: day, week, month, year, all. (default: day)
+      One or more time filters: day, week, month, year, all. (default: week)
   --count/-n
-      Number of media to fetch per combo (default: 50).
+      Number of media to fetch per combo. (default: 5)
   --type
       Media type filter: image | video (default: any).
   --sort
       top | hot (default: top).
+  --min-score
+      Skip posts with score (upvotes) below this number. (default: None)
+  --pick
+      Selection mode among filtered candidates: top | random (default: top).
+      - top: highest scores first (tie-breakers: upvote_ratio, num_comments, created_utc)
+      - random: uniform random pick among survivors
   --sleep
       Seconds to sleep between combos (default: 0).
   --strict-single
       Error if more than one subreddit is provided.
 
 Examples:
-  # Default: use idol terms against the hub sub, day/top, 50 per combo
+  # Default settings with minimum score of 200
+  python -m redditmedia.tools.matrix_download --min-score 200
+
+  # Default: use idol terms against the hub sub, week/top, 5 per combo
   python -m redditmedia.tools.matrix_download --use-terms
 
-  # Use specific subs WITHOUT idol terms (keep default count=50)
+  # Use specific subs WITHOUT idol terms (keep default count=5)
   python -m redditmedia.tools.matrix_download --no-terms --subs tzuyu TzuyuTWICE
 
-  # Use specific subs WITHOUT idol terms for day and week (keep default count=50)
+  # Use specific subs WITHOUT idol terms for day and week (keep default count=5)
   python -m redditmedia.tools.matrix_download --no-terms --subs tzuyu TzuyuTWICE --times day week
 
-  # Use specific search terms for specific subs for day and week (keep default count=50)
+  # Use specific search terms for specific subs for day and week (keep default count=5)
   python -m redditmedia.tools.matrix_download --idols tzuyu --subs twicensfw twicexnice --times day week
 
   # No terms; let tool pick default GROUP subs
@@ -81,8 +90,11 @@ Examples:
   # No terms; pick idol-specific default subs
   python -m redditmedia.tools.matrix_download --no-terms --idol-subs
 
-  # Video-only, week+month, 150 per combo
-  python -m redditmedia.tools.matrix_download --type video --times week month --count 150
+  # Video-only, week+month, 150 per combo, skip <200 upvotes, pick top
+  python -m redditmedia.tools.matrix_download --type video --times week month --count 150 --min-score 200 --pick top
+
+  # Random selection among survivors
+  python -m redditmedia.tools.matrix_download --use-terms --times month --count 30 --pick random
 
   # Guarded single-sub run
   python -m redditmedia.tools.matrix_download --subs kpopfap --strict-single
@@ -187,6 +199,10 @@ def parse_args() -> argparse.Namespace:
                    help="Media type filter (default: any).")
     p.add_argument("--sort", choices=["top", "hot"], default="top",
                    help="Sort mode (default: top).")
+    p.add_argument("--min-score", type=int, default=None,
+                   help="Skip posts with score (upvotes) below this number.")
+    p.add_argument("--pick", choices=["top", "random"], default="top",
+                   help="How to pick among filtered posts: highest scores first (top) or random (default: top).")
     p.add_argument("--sleep", type=float, default=0.0,
                    help="Sleep seconds between combos (default: 0).")
 
@@ -237,6 +253,8 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                     print(
                         f"\n=== Running combo: sub={sub} | term={human_term} | "
                         f"time={tf} | count={ns.count} | type={ns.type or 'any'} ==="
+                        + (f" | min_score={ns.min_score}" if ns.min_score is not None else "")
+                        + f" | pick={ns.pick}"
                     )
 
                     pipe = DownloaderPipeline(
@@ -246,6 +264,8 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                         time_filter=tf,
                         media_type=ns.type,
                         media_count=ns.count,
+                        min_score=ns.min_score,
+                        pick_mode=ns.pick,
                         close_on_exit=False,
                         external_reddit=reddit,
                         write_report=False,  # we’ll write one unified report
