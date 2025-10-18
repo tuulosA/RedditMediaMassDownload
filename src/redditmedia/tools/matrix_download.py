@@ -7,9 +7,13 @@ from typing import List, Optional, Dict, Any
 from kpop_taxonomy.data import (
     hub_sub,
     default_idols,
+    groups as taxonomy_groups,
     group_subs,
     personal_subs_map,
 )
+
+GROUPS = taxonomy_groups()
+GROUP_NAMES = sorted(GROUPS.keys())
 
 from ..reddit_mass_downloader.downloader_pipeline import DownloaderPipeline
 from ..reddit_mass_downloader.config_overrides import REPORT_DIR, OUTPUT_ROOT
@@ -47,17 +51,24 @@ CLI:
 Important options:
   --use-terms / --no-terms
       Whether to search with idol terms. (default: --use-terms)
-  --group-subs / --idol-subs
-      Only used when not using terms AND you didn't pass --subs.
-      Picks between default group-oriented subs vs idol-specific ones.
+  --group-subs / --idol-subs / --all-subs
+      Only used when NOT using terms AND you didn't pass --subs.
+      Picks between default group-oriented subs vs idol-specific subs (or both).
+      Selecting any of these implies --no-terms if --subs is not provided.
       (default: --group-subs)
+  --group <name>
+      Group-scoped, mega-like run for a single group (case-insensitive; must be a known group).
+      Behavior: the hub sub uses that group's member names as idol search terms;
+      all subs related to that group (group subs + personal subs for members) are fetched with NO terms.
+      Incompatible with --mega and --subs.
   --mega
-      Combine the default hub × idol matrix with all personal subs (group + idol).
-      Idol terms apply only to the hub; the personal subs are fetched without terms.
+      Combine the default hub × idol matrix with ALL personal subs (group + idol).
+      Idol terms apply only to the hub; personal/group subs are fetched without terms.
+      Incompatible with --group and --subs.
   --subs/-s
-      One or more subreddits to target (overrides default pools).
+      One or more subreddits to target (overrides default pools). Incompatible with --mega and --group.
   --idols/-i
-      Idol search terms (used only with --use-terms).
+      Idol search terms (used only with --use-terms). Default is all idols from the taxonomy.
   --times/-t
       One or more time filters: day, week, month, year, all. (default: week)
   --count/-n
@@ -75,7 +86,7 @@ Important options:
   --sleep
       Seconds to sleep between combos (default: 0).
   --strict-single
-      Error if more than one subreddit is provided.
+      Error if more than one subreddit is provided. Incompatible with --mega and --group.
 
 Examples:
   # Default settings with minimum score of 200
@@ -117,6 +128,24 @@ Examples:
   # Mega run: hub × idols + all personal and group subs (no terms)
   python -m redditmedia.tools.matrix_download --mega --min-score 2500
   python -m redditmedia.tools.matrix_download --mega --min-score 2500 --times year all
+
+  # Group-scoped run (TWICE): hub uses member names as terms; all TWICE-related subs fetched with no terms
+  python -m redditmedia.tools.matrix_download --group twice
+
+  # Group-scoped run with filters: year+all, min score 500
+  python -m redditmedia.tools.matrix_download --group ive --times year all --min-score 500
+
+  # Group-scoped run for LE SSERAFIM (case-insensitive OK), video-only, random pick, 40 per combo
+  python -m redditmedia.tools.matrix_download --group lesserafim --type video --pick random --count 40
+
+  # Group-scoped run for (G)I-DLE across year+all-time, top sort
+  python -m redditmedia.tools.matrix_download --group gidle --times year all --sort top
+
+  # Note: --group cannot be combined with --mega or --subs
+  # (this will error)
+  python -m redditmedia.tools.matrix_download --group twice --mega
+  python -m redditmedia.tools.matrix_download --group twice --subs twicensfw
+
 """
 
 # ----------------------------- Defaults --------------------------------
@@ -151,7 +180,7 @@ def parse_args() -> argparse.Namespace:
         "--group-subs",
         dest="use_group_subs",
         action="store_true",
-        default=None,  # <-- important: None means "not explicitly chosen"
+        default=None,  # None means "not explicitly chosen"
         help="Use group-oriented subs (implies --no-terms if --subs not provided).",
     )
     pool.add_argument(
@@ -171,10 +200,8 @@ def parse_args() -> argparse.Namespace:
         dest="mega",
         action="store_true",
         default=False,
-        help=(
-            "Combine the default hub × idol matrix with ALL personal subs (group + idol). "
-            "Runs idol terms only against the hub and omits terms for the personal subs."
-        ),
+        help=("Combine the default hub × idol matrix with ALL personal subs (group + idol). "
+              "Runs idol terms only against the hub and omits terms for the personal subs."),
     )
 
     # Scope
@@ -185,9 +212,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--idols", "-i", nargs="+", default=DEFAULT_IDOLS,
                    help="Search terms (used only with --use-terms).")
     p.add_argument("--times", "-t", nargs="+", default=DEFAULT_TIMES,
-                   help="Time filters: day, week, month, year, all (default: day).")
+                   help="Time filters: day, week, month, year, all (default: week).")
     p.add_argument("--count", "-n", type=int, default=5,
-                   help="Number of media to fetch per combo (default: 50).")
+                   help="Number of media to fetch per combo (default: 5).")
     p.add_argument("--type", choices=["image", "video"], default=None,
                    help="Media type filter (default: any).")
     p.add_argument("--sort", choices=["top", "hot"], default="top",
@@ -201,41 +228,81 @@ def parse_args() -> argparse.Namespace:
     ], help="Case-insensitive title keywords/phrases to exclude (space/underscore variants are treated the same).")
     p.add_argument("--sleep", type=float, default=0.0,
                    help="Sleep seconds between combos (default: 0).")
-
-    # Safety
     p.add_argument("--strict-single", action="store_true",
                    help="Error if more than one subreddit is provided.")
 
+    # NEW: group-scoped mega-like mode (case-insensitive)
+    p.add_argument("--group", choices=GROUP_NAMES, type=str.lower, default=None,
+                   help=("Group-scoped run: hub uses that group's member names as idol terms, "
+                         "and all group-related subs (group + personal) are fetched without terms. "
+                         "Incompatible with --mega/--subs."))
+
     return p.parse_args()
 
+def _group_member_terms(gname: str) -> List[str]:
+    # exact idol names from taxonomy for hub search terms
+    return list(GROUPS.get(gname, []))
+
+def _group_related_subs(gname: str) -> List[str]:
+    """
+    All subs tied to this group:
+      - every group_sub that maps to this group
+      - every personal_sub whose idol is one of this group's members
+    Dedupe while preserving order.
+    """
+    members = set(GROUPS.get(gname, []))
+    gs = [sub for sub, grp in group_subs().items() if grp == gname]
+    ps = [sub for sub, idol in personal_subs_map().items() if idol in members]
+    return list(dict.fromkeys(gs + ps))  # order-preserving dedupe
 
 async def run_matrix(ns: argparse.Namespace) -> None:
     use_mega = getattr(ns, "mega", False)
 
+    # ---- Validate incompatible switches
     if use_mega and ns.subs:
         raise SystemExit("--mega cannot be combined with --subs; it always uses the default pools.")
+    if ns.group and (use_mega or ns.subs):
+        raise SystemExit("--group cannot be combined with --mega or --subs.")
+    
     # If a pool flag was chosen (or all-subs) and the user didn't pass explicit --subs,
-    # force no-terms so we never search on non-hub subs. Skip this in mega mode since
-    # it manages its own combo plan.
-    if (not use_mega) and ns.subs is None and (getattr(ns, "use_all_subs", False) or ns.use_group_subs is not None):
+    # force no-terms so we never search on non-hub subs. Skip this in mega / group modes.
+    if (not use_mega) and (not ns.group) and ns.subs is None and (getattr(ns, "use_all_subs", False) or ns.use_group_subs is not None):
         ns.use_terms = False
 
     if ns.strict_single:
-        if use_mega:
-            raise SystemExit("--strict-single cannot be used together with --mega.")
+        if use_mega or ns.group:
+            raise SystemExit("--strict-single cannot be used together with --mega or --group.")
         if len(ns.subs or []) != 1:
             raise SystemExit("With --strict-single, provide exactly one subreddit via --subs.")
 
     combos_plan: List[Dict[str, Any]] = []
 
-    # Decide subreddits if not explicitly provided
-    if use_mega:
+    # ---- GROUP MODE (mega-like but scoped)
+    if ns.group:
+        gname = ns.group
+        hub_terms = _group_member_terms(gname)      # idol terms == group members
+        related_subs = _group_related_subs(gname)   # all group + personal subs
+
+        # 1) Hub with terms (members only)
+        combos_plan.append({"sub": HUB_SUB, "terms": hub_terms})
+
+        # 2) All related subs without terms
+        for sub in related_subs:
+            combos_plan.append({"sub": sub, "terms": [None]})
+
+        mode_str = f"GROUP MODE ({gname}) → HUB × members + {len(related_subs)} related subs (no terms)"
+
+    # ---- MEGA MODE
+    elif use_mega:
         mega_pool = list(dict.fromkeys(PERSONAL_GROUP_SUBS + PERSONAL_SUBS))
         combos_plan.append({"sub": HUB_SUB, "terms": ns.idols})
         for sub in mega_pool:
             combos_plan.append({"sub": sub, "terms": [None]})
         mode_str = "MEGA MODE → HUB SUB × IDOLS + PERSONAL (group + idol) SUBS"
+
+    # ---- CLASSIC MODE
     else:
+        # Decide subreddits if not explicitly provided
         if not ns.subs:
             if ns.use_terms:
                 # Using terms => hub (kpopfap)
@@ -246,7 +313,7 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                     # Combine both pools; dedupe while preserving order
                     ns.subs = list(dict.fromkeys(PERSONAL_GROUP_SUBS + PERSONAL_SUBS))
                 else:
-                    # If user did not explicitly pick a pool, default to GROUP subs (old behavior)
+                    # If user did not explicitly pick a pool, default to GROUP subs
                     if ns.use_group_subs is None or ns.use_group_subs is True:
                         ns.subs = PERSONAL_GROUP_SUBS
                     else:
@@ -255,15 +322,13 @@ async def run_matrix(ns: argparse.Namespace) -> None:
         term_list: List[Optional[str]] = (ns.idols if ns.use_terms else [None])
         combos_plan = [{"sub": sub, "terms": term_list} for sub in ns.subs]
 
-    # Derive human-readable mode string
-    if not use_mega:
+        # Derive human-readable mode string
         if ns.use_terms:
             mode_str = "IDOL TERMS → HUB SUBS (or --subs if provided)"
         else:
             if getattr(ns, "use_all_subs", False):
                 mode_str = "NO TERMS → ALL SUBS (group + idol) (or --subs if provided)"
             else:
-                # If user didn’t explicitly choose, default label is GROUP SUBS
                 pool_label = "GROUP SUBS" if (ns.use_group_subs is None or ns.use_group_subs is True) else "IDOL-SPECIFIC SUBS"
                 mode_str = f"NO TERMS → {pool_label} (or --subs if provided)"
 
