@@ -4,6 +4,12 @@ import argparse
 from datetime import datetime
 from time import perf_counter
 from typing import List, Optional, Dict, Any
+from kpop_taxonomy.data import (
+    hub_sub,
+    default_idols,
+    group_subs,
+    personal_subs_map,
+)
 
 from ..reddit_mass_downloader.downloader_pipeline import DownloaderPipeline
 from ..reddit_mass_downloader.config_overrides import REPORT_DIR, OUTPUT_ROOT
@@ -116,72 +122,15 @@ Examples:
 # ----------------------------- Defaults --------------------------------
 
 # Hub sub (used when --use-terms and no --subs)
-HUB_SUB = "kpopfap"
+HUB_SUB = hub_sub()
 
-# Idol search terms
-DEFAULT_IDOLS = [
-    # TWICE
-    "mina", "momo", "sana", "tzuyu", "nayeon", "dahyun", "jihyo", "chaeyoung", "jeongyeon",
-    # LE SSERAFIM
-    "chaewon", "sakura", "yunjin", "kazuha", "eunchae",
-    # ITZY
-    "yeji", "lia", "ryujin", "chaeryeong", "yuna",
-    # aespa
-    "karina", "giselle", "winter", "ningning",
-    # (G)I-DLE
-    "miyeon", "minnie", "soyeon", "yuqi", "shuhua",
-    # Red Velvet
-    "irene", "seulgi", "wendy", "joy", "yeri",
-    # BLACKPINK
-    "lisa", "jennie", "rose", "jisoo",
-    # IVE
-    "wonyoung", "rei", "leeseo", "liz", "yujin", "gaeul",
-    # Soloists
-    "eunbi", "somi",
-]
+# Idol search terms (flattened groups + any soloists in the taxonomy)
+DEFAULT_IDOLS = default_idols()
 
 # Default pools used only when --no-terms AND no --subs were provided.
-PERSONAL_SUBS = [
-    # TWICE
-    "myouimina", "nayeon", "jeongyeon", "momo", "momoTWICE", "sana", "jihyo", "ParkJihyo", "dahyun", "chaeyoung", "tzuyu", "TzuyuTWICE",
-    # LE SSERAFIM
-    "chaewon", "chaewonkim", "sakura", "yunjinhuh", "kazuha", "kazuhanakamura", "hongeunchae", "eunchaehong",
-    # ITZY
-    "yeji", "YejiHwang", "lia", "ryujin", "RyujinITZY", "chaeryeong", "LeeChaeryeong", "yuna", "ShinYuna",
-    # aespa
-    "karina", "yoojimin", "giselle", "GiselleNSFW", "winteraespa", "kimminjeong", "ningning", "yizhuoning",
-    # (G)I-DLE
-    "miyeon", "ChoMiyeon", "minniegidle", "soyeon", "SoyeonGIDLE", "yuqi", "shuhua", "YehShuhua",
-    # Red Velvet
-    "baeirene", "RedVelvet_Irene", "seulgi", "wendyredvelvet", "joy_redvelvet", "yeri",
-    # BLACKPINK
-    "lalisa", "Lalisa_Manoban", "jenniekim", "jennie", "rose", "jisoo",
-    # IVE
-    "wonyoung", "Wonyoung_IVE", "Rei_IVE", "leeseo", "Leeseo_IVE", "liz", "LIZ_IVE", "yujin", "Yujin_IVE", "gaeul", "Gaeul_IVE", "KimGaeul",
-    # Soloists
-    "kwon_eunbi", "kwoneunbi", "somi", "somi_nsfw",
-]
-
-PERSONAL_GROUP_SUBS = [
-    # TWICE
-    "twicensfw", "twicexnice", "twice_hotties", "twicemedia",
-    # LE SSERAFIM
-    "LeSserafim_Hotties",
-    # MISAMO
-    "misamo", "mimosa",
-    # ITZY
-    "itzy_hotties",
-    # aespa
-    "aespa_hotties",
-    # (G)I-DLE
-    "GIDLE_Hotties",
-    # Red Velvet
-    "RedVelvet_Hotties",
-    # IVE
-    "Ive_Hotties",
-    # BLACKPINK
-    "Blackpink_Hotties",
-]
+# Note: taxonomy keys are lowercase; Reddit subreddit names are case-insensitive.
+PERSONAL_SUBS = list(personal_subs_map().keys())
+PERSONAL_GROUP_SUBS = list(group_subs().keys())
 
 # Time filters
 DEFAULT_TIMES = ["week"]
