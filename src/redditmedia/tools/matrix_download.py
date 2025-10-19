@@ -72,7 +72,7 @@ Important options:
   --times/-t
       One or more time filters: day, week, month, year, all. (default: week)
   --count/-n
-      Number of media to fetch per combo. (default: 5)
+      Number of media to fetch per combo. (default: 250)
   --type
       Media type filter: image | video (default: any).
   --sort
@@ -219,7 +219,7 @@ def parse_args() -> argparse.Namespace:
                    help="Media type filter (default: any).")
     p.add_argument("--sort", choices=["top", "hot"], default="top",
                    help="Sort mode (default: top).")
-    p.add_argument("--min-score", type=int, default=None,
+    p.add_argument("--min-score", type=int, default=500,
                    help="Skip posts with score (upvotes) below this number.")
     p.add_argument("--pick", choices=["top", "random"], default="top",
                    help="How to pick among filtered posts: highest scores first (top) or random (default: top).")
