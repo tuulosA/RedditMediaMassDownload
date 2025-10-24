@@ -363,7 +363,7 @@ class LocalMediaSaver:
                         continue
 
                 # Optional: gif → mp4
-                if str(tmp_media).lower().endswith(".gif"):
+                if target_media.suffix.lower() == ".gif":
                     converted = await MediaUtils.convert_gif_to_mp4(str(tmp_media))
                     if converted:
                         try:
@@ -371,6 +371,7 @@ class LocalMediaSaver:
                         except Exception:
                             pass
                         tmp_media = Path(converted)
+                        target_media = target_media.with_suffix(".mp4")
 
                 if ENABLE_COMPRESSION:
                     maybe = await Compressor.validate_and_compress(str(tmp_media), MAX_FILE_SIZE_MB)
@@ -397,11 +398,12 @@ class LocalMediaSaver:
 
                 # Optional: write .json sidecar next to media
                 if WRITE_JSON_SIDECARS:
-                    tmp_meta = paths["meta"].with_suffix(paths["meta"].suffix + ".tmp")
+                    meta_path = target_media.with_suffix(target_media.suffix + ".json")
+                    tmp_meta = meta_path.with_suffix(meta_path.suffix + ".tmp")
                     try:
                         with open(tmp_meta, "w", encoding="utf-8") as f:
                             json.dump(meta, f, ensure_ascii=False, indent=2)
-                        await self._finalize_tmp(tmp_meta, paths["meta"])
+                        await self._finalize_tmp(tmp_meta, meta_path)
                     finally:
                         try:
                             if tmp_meta.exists():
@@ -434,7 +436,7 @@ class LocalMediaSaver:
             if not downloaded:
                 return None
 
-        if str(tmp_media).lower().endswith(".gif"):
+        if target_media.suffix.lower() == ".gif":
             converted = await MediaUtils.convert_gif_to_mp4(str(tmp_media))
             if not converted:
                 try:
@@ -447,6 +449,7 @@ class LocalMediaSaver:
             except Exception:
                 pass
             tmp_media = Path(converted)
+            target_media = target_media.with_suffix(".mp4")
 
         if ENABLE_COMPRESSION:
             maybe = await Compressor.validate_and_compress(str(tmp_media), MAX_FILE_SIZE_MB)
@@ -468,11 +471,12 @@ class LocalMediaSaver:
         meta = self._metadata(post, target_media, resolved, top_comment_text, top_comment_author)
 
         if WRITE_JSON_SIDECARS:
-            tmp_meta = paths["meta"].with_suffix(paths["meta"].suffix + ".tmp")
+            meta_path = target_media.with_suffix(target_media.suffix + ".json")
+            tmp_meta = meta_path.with_suffix(meta_path.suffix + ".tmp")
             try:
                 with open(tmp_meta, "w", encoding="utf-8") as f:
                     json.dump(meta, f, ensure_ascii=False, indent=2)
-                await self._finalize_tmp(tmp_meta, paths["meta"])
+                await self._finalize_tmp(tmp_meta, meta_path)
             finally:
                 try:
                     if tmp_meta.exists():

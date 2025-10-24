@@ -97,9 +97,42 @@ class MediaUtils:
             logger.error(f"File not found for conversion: {gif_path}")
             return None
 
-        mp4_path = gif_path.replace(".gif", ".mp4")
+        # If the input is already an MP4 container (misnamed as .gif/.gif.tmp),
+        # fast-path: just rename to .mp4/.mp4.tmp without re-encoding.
+        try:
+            with open(gif_path, "rb") as f:
+                header = f.read(12)
+            if len(header) >= 8 and header[4:8] == b"ftyp":
+                lower = gif_path.lower()
+                if lower.endswith(".gif.tmp"):
+                    renamed_path = gif_path[:-len(".gif.tmp")] + ".mp4.tmp"
+                elif lower.endswith(".gif"):
+                    renamed_path = gif_path[:-len(".gif")] + ".mp4"
+                else:
+                    renamed_path = gif_path + ".mp4"
+                try:
+                    os.replace(gif_path, renamed_path)
+                    logger.info(f"Input was already MP4; renamed to {renamed_path}")
+                    return renamed_path
+                except Exception as e:
+                    logger.warning(f"Rename to MP4 failed, falling back to ffmpeg: {e}")
+        except Exception:
+            # Non-fatal; fall through to normal conversion
+            pass
+
+        # Choose an output path that keeps ".tmp" if present, but ensures the
+        # final extension before any ".tmp" is ".mp4" so ffmpeg can pick the muxer.
+        lower = gif_path.lower()
+        if lower.endswith(".gif.tmp"):
+            mp4_path = gif_path[:-len(".gif.tmp")] + ".mp4.tmp"
+        elif lower.endswith(".gif"):
+            mp4_path = gif_path[:-len(".gif")] + ".mp4"
+        else:
+            # Fallback: append .mp4 (handles odd cases)
+            mp4_path = gif_path + ".mp4"
         command = [
             "ffmpeg", "-y", "-i", gif_path,
+            "-f", "mp4",  # ensure muxer when output ends with .tmp
             "-movflags", "faststart",
             "-pix_fmt", "yuv420p",
             "-preset", "ultrafast",
