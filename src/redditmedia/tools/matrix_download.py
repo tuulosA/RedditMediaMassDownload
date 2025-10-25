@@ -89,8 +89,8 @@ Important options:
       Error if more than one subreddit is provided. Incompatible with --mega and --group.
 
 Examples:
-  # Default settings with minimum score of 200
-  python -m redditmedia.tools.matrix_download --min-score 200
+  # Default settings with minimum score of 500
+  python -m redditmedia.tools.matrix_download --min-score 500
 
   # all-subs with min score
   python -m redditmedia.tools.matrix_download --all-subs --min-score 2000
@@ -116,8 +116,8 @@ Examples:
   # No terms; pick idol-specific default subs
   python -m redditmedia.tools.matrix_download --no-terms --idol-subs
 
-  # Video-only, week+month, 150 per combo, skip <200 upvotes, pick top
-  python -m redditmedia.tools.matrix_download --type video --times week month --count 150 --min-score 200 --pick top
+  # Video-only, week+month, 150 per combo, skip <500 upvotes, pick top
+  python -m redditmedia.tools.matrix_download --type video --times week month --count 150 --min-score 500 --pick top
 
   # Random selection among survivors
   python -m redditmedia.tools.matrix_download --use-terms --times month --count 30 --pick random
@@ -142,10 +142,13 @@ Examples:
   python -m redditmedia.tools.matrix_download --group gidle --times year all --sort top
 
   # Note: --group cannot be combined with --mega or --subs
-  # (this will error)
-  python -m redditmedia.tools.matrix_download --group twice --mega
-  python -m redditmedia.tools.matrix_download --group twice --subs twicensfw
+  python -m redditmedia.tools.matrix_download --group twice --mega <-- (this will error)
+  python -m redditmedia.tools.matrix_download --group twice --subs twicensfw <-- (this will error)
 
+  # all subs for today, with mins score
+  python -m redditmedia.tools.matrix_download --min-score 1000 --mega --times day
+  python -m redditmedia.tools.matrix_download --min-score 1000 --subs --times day
+  python -m redditmedia.tools.matrix_download --min-score 1000 --times day
 """
 
 # ----------------------------- Defaults --------------------------------
