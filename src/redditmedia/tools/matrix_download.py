@@ -1,5 +1,6 @@
 # redditmedia/tools/matrix_download.py
 import asyncio
+import os
 import argparse
 from datetime import datetime
 from time import perf_counter
@@ -238,6 +239,8 @@ def parse_args() -> argparse.Namespace:
                    help="Sleep seconds between combos (default: 0).")
     p.add_argument("--strict-single", action="store_true",
                    help="Error if more than one subreddit is provided.")
+    p.add_argument("--dry-run", action="store_true", default=False,
+                   help="Only fetch metadata and write report; do not download media.")
 
     # NEW: group-scoped mega-like mode (case-insensitive)
     p.add_argument("--group", choices=GROUP_NAMES, type=str.lower, default=None,
@@ -282,6 +285,16 @@ async def run_matrix(ns: argparse.Namespace) -> None:
             raise SystemExit("--strict-single cannot be used together with --mega or --group.")
         if len(ns.subs or []) != 1:
             raise SystemExit("With --strict-single, provide exactly one subreddit via --subs.")
+
+    # Respect dry-run by environment so downstream pipeline can pick it up
+    if getattr(ns, "dry_run", False):
+        os.environ["RMD_DRY_RUN"] = "1"
+    else:
+        # ensure not leaking from prior runs
+        try:
+            os.environ.pop("RMD_DRY_RUN")
+        except KeyError:
+            pass
 
     combos_plan: List[Dict[str, Any]] = []
 
@@ -340,6 +353,8 @@ async def run_matrix(ns: argparse.Namespace) -> None:
                 pool_label = "GROUP SUBS" if (ns.use_group_subs is None or ns.use_group_subs is True) else "IDOL-SPECIFIC SUBS"
                 mode_str = f"NO TERMS → {pool_label} (or --subs if provided)"
 
+    if getattr(ns, "dry_run", False):
+        mode_str = f"{mode_str} [DRY-RUN]"
     print(f"\n=== MODE: {mode_str} ===")
 
     grand_total = 0

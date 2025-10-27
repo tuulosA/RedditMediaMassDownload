@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -47,6 +48,7 @@ class DownloaderPipeline:
         close_on_exit: bool = True,                  # keep False when looping
         external_reddit: Optional[Reddit] = None,    # inject shared client
         write_report: bool = True,                   # allow caller to suppress per-run JSON
+        dry_run: bool = False,                       # NEW: metadata-only; do not download
     ):
         self.subreddits = subreddits
         self.search_terms = search_terms or []
@@ -64,6 +66,8 @@ class DownloaderPipeline:
         self._owns_reddit = external_reddit is None
         self.close_on_exit = close_on_exit
         self.write_report = write_report
+        # Allow env override so callers don't need to plumb the arg
+        self.dry_run = bool(dry_run or (os.getenv("RMD_DRY_RUN", "").strip() == "1"))
 
         self._last_summary: Optional[RunSummary] = None
 
@@ -110,8 +114,11 @@ class DownloaderPipeline:
                 label_raw = f"{sub_part} {' '.join(self.search_terms)}".strip()
                 collection_label = slugify_title(label_raw, max_len=120)
 
-            saver = LocalMediaSaver(self.reddit, collection_label=collection_label)
-            await saver._ensure_ready()
+            # If dry-run, skip creating saver and only collect metadata
+            saver: Optional[LocalMediaSaver] = None
+            if not self.dry_run:
+                saver = LocalMediaSaver(self.reddit, collection_label=collection_label)
+                await saver._ensure_ready()
 
             for post in posts:
                 post_info = {
@@ -125,8 +132,13 @@ class DownloaderPipeline:
                     "num_comments": getattr(post, "num_comments", None),
                     "created_utc": getattr(post, "created_utc", None),
                 }
+                # Dry-run: record only metadata, mark status as 'listed'
+                if self.dry_run:
+                    outcomes.append({**post_info, "status": "listed"})
+                    continue
+
                 try:
-                    result = await saver.save_post(post)
+                    result = await saver.save_post(post)  # type: ignore[union-attr]
                     if isinstance(result, list):
                         if result:
                             saved_count += len(result)
