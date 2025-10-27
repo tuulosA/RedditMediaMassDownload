@@ -149,6 +149,11 @@ Examples:
   python -m redditmedia.tools.matrix_download --min-score 1000 --mega --times day
   python -m redditmedia.tools.matrix_download --min-score 1000 --subs --times day
   python -m redditmedia.tools.matrix_download --min-score 1000 --times day
+
+  # new group runs
+  python -m redditmedia.tools.matrix_download --group ohmygirl --times year all --min-score 500
+  python -m redditmedia.tools.matrix_download --group nmixx --times year all --min-score 500
+  python -m redditmedia.tools.matrix_download --group mamamoo --times year all --min-score 500
 """
 
 # ----------------------------- Defaults --------------------------------
