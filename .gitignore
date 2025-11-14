@@ -2,6 +2,7 @@ __pycache__/
 .vs/
 .idea/
 .env
+.venv
 logs/*.log
 auto_posts/*
 followed_users.json
