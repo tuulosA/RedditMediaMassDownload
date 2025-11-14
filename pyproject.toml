@@ -28,7 +28,6 @@ dev = ["pytest", "ruff", "mypy", "pre-commit"]
 [project.scripts]
 redditmedia-bot = "redditmedia.__main__:main"
 redditmedia-download = "redditmedia.reddit_mass_downloader.cli:main"
-redditmedia-matrix = "redditmedia.tools.matrix_download:main"
 
 [tool.ruff]
 line-length = 100
